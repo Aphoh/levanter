@@ -794,7 +794,11 @@ class RQwenLMHeadModel(LmHeadModel[RQwenConfig], ModuleWithStateDictSerializatio
         if Experts.size > 1:
             x = self.activations(input_ids, attn_mask=attn_mask, key=k_head)
             # Get the hidden states for the idxs we select
-            router_inputs = x.take(Pos, router_hs_idxs)
+            router_inputs = hax.where(
+                router_hs_idxs == -1,
+                hax.zeros_like(x),
+                x.take(Pos, router_hs_idxs)
+            )
             # Get the logits from the router
             if router_stop_grad:
                 router_inputs = jax.lax.stop_gradient(router_inputs)
