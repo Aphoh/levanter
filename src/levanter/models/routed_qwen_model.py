@@ -756,7 +756,7 @@ class ExpertBiasTracker():
     load: NamedArray
 
     @staticmethod
-    def init(config: RQwenConfig):
+    def zero(config: RQwenConfig):
         return ExpertBiasTracker(hax.zeros(config.RouterOut), hax.zeros(config.RouterOut))
 
     def __add__(self, other: "ExpertBiasTracker") -> "ExpertBiasTracker":
@@ -994,7 +994,7 @@ class RQwenLMHeadModel(LmHeadModel[RQwenConfig], ModuleWithStateDictSerializatio
 
         if expert_bias is not None:
             # Put the new bias in, per_expert_load will get aggregated across microbatches
-            extras.aux["expert_bias"] = expert_bias.update(expert_load, self.config)
+            extras.aux["expert_bias"] = expert_bias.update(expert_load.sum((Batch)), self.config)
 
         extras.loggable["router/logits"] = LogitHistogram.init(router_logits)
         return (res, router_logits.astype(compute_dtype), expert_mask.astype(compute_dtype), expert_load.astype(compute_dtype), extras)
