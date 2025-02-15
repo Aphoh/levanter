@@ -83,7 +83,7 @@ class LowRankLinear(ModuleWithStateDictSerialization):
 
 
 def is_routed_experts_param(x):
-    return isinstance(x, (Router, RQwenMlpExperts, LowRankLinear))
+    return isinstance(x, (RQwenMlpExperts, Router, LowRankLinear))
 
 
 def routed_experts_trainable_params_filter(model: eqx.Module) -> Dict[str, jnp.ndarray]:
@@ -930,6 +930,7 @@ class RQwenLMHeadModel(LmHeadModel[RQwenConfig], ModuleWithStateDictSerializatio
             _, top_k_indices = hax.top_k(topk_inp, Experts, TopK.size, TopK)
             expert_mask = create_expert_mask_from_acts(TopK, Experts, top_k_indices, router_acts.astype(compute_dtype))
         else:
+            assert expert_bias is None, "Expert bias only supported with router_act_before_topk"
             elems, top_k_indices = hax.top_k(router_logits, Experts, TopK.size, TopK)
             elems = self.router_activation(elems, TopK)
             expert_mask = create_expert_mask(TopK, Experts, top_k_indices, elems.astype(compute_dtype))

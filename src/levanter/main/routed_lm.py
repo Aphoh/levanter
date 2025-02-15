@@ -61,7 +61,7 @@ class TrainLmConfig:
     full_ft_base_weights_optimizer: Optional[OptimizerConfig] = None
 
     # If loss-free load balancing is enable, lb_loss_weight should be really small, ideally less than 0.0001
-    lb_loss_weight: float = 0.01
+    lb_loss_weight: float = 0.0
 
     def __post_init__(self):
         if self.embedding_router_token_ft and self.full_ft:
@@ -117,7 +117,7 @@ def compute_next_token_loss(
     loss_dtype: Optional[Type[jnp.dtype]] = jnp.float32,
     router_zloss_weight: float = 0.0,
     router_zloss_normalize_by_seqlen: bool = True,
-    lb_loss_weight: float = 0.01,
+    lb_loss_weight: float = 0.0,
     stop_grad: bool = True,
     expert_bias: Optional[hax.NamedArray] = None,
 ) -> tuple[hax.NamedArray, hax.NamedArray, Extras]:
