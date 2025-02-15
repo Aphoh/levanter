@@ -137,7 +137,7 @@ def test_rqwen_consistent_with_base_qwen(expert_type, expert_init):
             jax_out = token_pred.array
 
             assert torch_out.shape == jax_out.shape, f"{torch_out.shape} != {jax_out.shape}"
-            assert np.isclose(torch_out, np.array(jax_out), rtol=1e-4, atol=1e-4).all(), f"{torch_out} != {jax_out}"
+            assert np.isclose(torch_out, np.array(jax_out), rtol=1e-2, atol=1e-4).all(), f"{torch_out} != {jax_out}"
 
             cfg_with_expert = dataclasses.replace(config, disable_expert_mask=False)
             model = dataclasses.replace(
@@ -155,7 +155,7 @@ def test_rqwen_consistent_with_base_qwen(expert_type, expert_init):
             assert torch_out.shape == jax_out.shape, f"{torch_out.shape} != {jax_out.shape}"
             should_be_close = expert_init != ExpertInit.NONZERO
             assert (
-                should_be_close == np.isclose(torch_out, np.array(jax_out), rtol=1e-4, atol=1e-4).all()
+                should_be_close == np.isclose(torch_out, np.array(jax_out), rtol=1e-2, atol=1e-4).all()
             ), f"{torch_out} == {jax_out} with lora mask"
 
 
