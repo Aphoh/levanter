@@ -59,7 +59,7 @@ class TrainLmConfig:
     embedding_router_token_ft: bool = False
 
     full_ft_base_weights_optimizer: Optional[OptimizerConfig] = None
-    
+
     # If loss-free load balancing is enable, lb_loss_weight should be really small, ideally less than 0.0001
     lb_loss_weight: float = 0.01
 
@@ -78,30 +78,35 @@ class TrainLmConfig:
 # Adapted from transformers.models.mixtral.modeling_mixtral.load_balancing_loss_func
 # Fixed aggregating over all layers
 def compute_load_balancing_loss(
-     config: RQwenConfig,
-     expert_mask: hax.NamedArray,
-     expert_load: hax.NamedArray,
-     seq_length: hax.NamedArray
+    config: RQwenConfig,
+    expert_mask: hax.NamedArray,
+    first_token_mask: hax.NamedArray,
 ) -> hax.NamedArray:
+    """
+    Compute the load balancing loss for the router.
+    expert_mask: [Batch, Pos, Experts] or [Batch, Pos, Layers, Experts] - the expert mask used by the model
+    first_token_mask: [Batch, Pos] - the mask for the first token of each sequence
 
-    Pos, Layers, Experts, TopK = config.Pos, config.Layers, config.Experts, config.TopK
-    # If we are doing sequence load balancing, then need to adjust the expert_mask following the seq_length
-    expert_mask /= seq_length
-    
-    # Since each example is a set of packed sequences, we want to find the number of sequences in each example of the batch
-    num_seqs = hax.sum(1 / seq_length, axis=(Pos,), where=seq_length>=0)
+    Returns an array of shape [Batch] to be added to the loss of each sequence.
+    """
+
+    Pos, Experts, TopK = config.Pos, config.Experts, config.TopK
+
+    # Make a mask the same shape as the mask
+    mask = first_token_mask.broadcast_to(expert_mask.axes)
 
     # Compute the number of sequences routed to each expert.
-    seqs_per_expert = expert_load / num_seqs
+    seqs_per_expert = hax.sum(expert_mask > 0, axis=(Pos,), where=mask)
 
     # Compute the average probability of routing to these experts
-    router_prob_per_expert = hax.sum(expert_mask, axis=(Pos,), where=seq_length>=0) / num_seqs
+    router_prob_per_expert = hax.mean(expert_mask, axis=(Pos,), where=mask)
 
-    N = Experts.size -TopK.size if config.prefill_expert else Experts.size
+    N = Experts.size - TopK.size if config.prefill_expert else Experts.size
+    # TODO(Long): check if this is correct plz
     lb_loss = hax.sum(seqs_per_expert * router_prob_per_expert, axis=config.RouterOut) * N / TopK.size
-        
-    # Current load balancing loss is on token-based. Should change to sequence-based later?
+
     return lb_loss
+
 
 def compute_next_token_loss(
     model: RQwenLMHeadModel,
@@ -123,7 +128,7 @@ def compute_next_token_loss(
     """
     assert isinstance(example, RoutableLmExample)
     # This is problematic, we don't get correctly batched ones so...
-    activations, rlogits, expert_mask, expert_load, extras = model.routed_forward(
+    activations, rlogits, expert_mask, extras = model.routed_forward(
         example,
         key=key,
         activations=True,
@@ -156,17 +161,18 @@ def compute_next_token_loss(
         if model.config.Layers in z_loss.axes:
             z_loss = hax.mean(z_loss, model.config.Layers)
         if router_zloss_normalize_by_seqlen:
-            z_loss /= example.seq_length
+            z_loss *= example.completion_first_token_mask
         extras.loggable["router/z_loss"] = MeanScalar.init(z_loss, where=mask)
         losses += router_zloss_weight * z_loss * example.completion_mask
-        
+
     if lb_loss_weight > 0.0:
         # implementing lbl for router. We can extract the latest load on expert from model.router
-        lb_loss = compute_load_balancing_loss(
-            model.config, expert_mask, expert_load, example.seq_length
-        )
-        # hack: since our lb_loss is scalar, we convert it to NamedArray with same shape as losses.
-        lb_loss = lb_loss.broadcast_axis(model.Pos)
+        assert expert_mask is not None, "Need expert mask for load balancing loss. Is it disabled?"
+        lb_loss = compute_load_balancing_loss(model.config, expert_mask, example.completion_first_token_mask)
+        # hack: since our lb_loss is [Batch,], we convert it to NamedArray with same shape as losses.
+        # These will get averaged across tokens and then across batches, so the lbl is effectively only
+        # averaged across batches
+        lb_loss = lb_loss.broadcast_to(losses.axes)
         extras.loggable["router/lb_loss"] = MeanScalar.init(lb_loss, where=mask)
         losses += lb_loss_weight * lb_loss
 
@@ -241,7 +247,7 @@ def main(config: TrainLmConfig):
         logsumexp_weight=config.z_loss_weight,
         router_zloss_weight=config.router_z_loss_weight,
         router_zloss_normalize_by_seqlen=config.router_z_loss_normalize_by_seqlen,
-        lb_loss_weight = config.lb_loss_weight,
+        lb_loss_weight=config.lb_loss_weight,
         stop_grad=stop_grad,
     )
 

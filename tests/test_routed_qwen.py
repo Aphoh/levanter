@@ -15,6 +15,7 @@ from haliax.partitioning import ResourceAxis
 from levanter.models.attention import AttentionMask
 from levanter.models.lm_model import RoutableLmExample
 from levanter.models.routed_qwen_model import (
+    ExpertBiasTracker,
     ExpertInit,
     ExpertType,
     RLoraLinear,
@@ -22,10 +23,13 @@ from levanter.models.routed_qwen_model import (
     RQwenLMHeadModel,
     base_weights_mask,
     create_expert_mask,
+    create_expert_mask_from_acts,
     reinit_expert_weights,
     routed_experts_mask,
     routed_experts_trainable_params_filter,
 )
+from levanter.utils.stat_utils import IndexCountHistogram, IndexCountUnique
+from levanter.utils.types import Extras
 from test_utils import skip_if_no_torch
 
 
@@ -56,7 +60,8 @@ def test_routed_qwen_forward():
 
         x = hax.random.randint(key, (Batch, config.Pos), 0, Vocab.size)
         inds = hax.random.randint(key, (Batch, config.Pos), 0, config.Pos.size - 1)
-        example = RoutableLmExample(x, None, router_hs_idxs=inds)
+        first_mask = hax.random.randint(key, (Batch, config.Pos), 0, 1).astype(bool)
+        example = RoutableLmExample(x, None, router_hs_idxs=inds, completion_first_token_mask=first_mask)
         _ = model.routed_forward(example)
 
         # test with num_experts=1
@@ -101,7 +106,10 @@ def test_rqwen_consistent_with_base_qwen(expert_type, expert_init):
     input = hax.random.randint(jax.random.PRNGKey(0), (Batch, config.Pos), 0, Vocab.size)
     seq_inds = hax.random.randint(jax.random.PRNGKey(0), (Batch, config.Pos), 0, config.Pos.size - 1)
     attn_mask = AttentionMask.causal()
-    example = RoutableLmExample(input, None, attn_mask=attn_mask, router_hs_idxs=seq_inds)
+    first_mask = hax.random.randint(jax.random.PRNGKey(0), (Batch, config.Pos), 0, 1).astype(bool)
+    example = RoutableLmExample(
+        input, None, attn_mask=attn_mask, router_hs_idxs=seq_inds, completion_first_token_mask=first_mask
+    )
     input_torch = torch.from_numpy(np.array(input.array)).to(torch.int32)
 
     torch.random.manual_seed(0)
@@ -125,7 +133,7 @@ def test_rqwen_consistent_with_base_qwen(expert_type, expert_init):
                 model_output = model.routed_forward(example)
                 return model_output
 
-            token_pred, mask, extras = compute(model, example)
+            token_pred, mask, _, extras = compute(model, example)
             jax_out = token_pred.array
 
             assert torch_out.shape == jax_out.shape, f"{torch_out.shape} != {jax_out.shape}"
@@ -141,7 +149,7 @@ def test_rqwen_consistent_with_base_qwen(expert_type, expert_init):
                 model_output = model.routed_forward(example)
                 return model_output
 
-            token_pred, mask, extras = compute(model, example)
+            token_pred, mask, _, extras = compute(model, example)
             jax_out = token_pred.array
 
             assert torch_out.shape == jax_out.shape, f"{torch_out.shape} != {jax_out.shape}"
@@ -330,28 +338,95 @@ def test_create_expert_mask(with_layers):
         MaskShape = (Batch, Pos, Layer, Expert)
     activations = hax.random.uniform(jax.random.PRNGKey(0), MaskShape)
     elems, inds = hax.top_k(activations, Expert, k=TopK.size, new_axis=TopK)
-    mask = create_expert_mask(TopK, Expert, inds, elems)
 
-    def get(x, *args):
-        return x.__getitem__(args)
+    def check_mask(mask):
+        def get(x, *args):
+            return x.__getitem__(args)
 
-    def check_idx(*idxs):
-        bp_inds: List[int] = get(inds, *idxs).tolist()
-        for e in range(Expert.size):
-            if e in bp_inds:
-                idx = bp_inds.index(e)
-                val = get(elems, *idxs, TopK, idx)
-                assert get(mask, *idxs, Expert, e) == val
-            else:
-                assert get(mask, *idxs, Expert, e) == 0.0
+        def check_idx(*idxs):
+            bp_inds: List[int] = get(inds, *idxs).tolist()
+            for e in range(Expert.size):
+                if e in bp_inds:
+                    idx = bp_inds.index(e)
+                    val = get(elems, *idxs, TopK, idx)
+                    assert get(mask, *idxs, Expert, e) == val
+                else:
+                    assert get(mask, *idxs, Expert, e) == 0.0
 
-    for b in range(Batch.size):
-        for p in range(Pos.size):
-            if with_layers:
-                for li in range(Layer.size):
-                    check_idx(Batch, b, Pos, p, Layer, li)
-            else:
-                check_idx(Batch, b, Pos, p)
+        for b in range(Batch.size):
+            for p in range(Pos.size):
+                if with_layers:
+                    for li in range(Layer.size):
+                        check_idx(Batch, b, Pos, p, Layer, li)
+                else:
+                    check_idx(Batch, b, Pos, p)
+
+    mask1 = create_expert_mask(TopK, Expert, inds, elems)
+    check_mask(mask1)
+
+    mask2 = create_expert_mask_from_acts(TopK, Expert, inds, activations)
+    check_mask(mask2)
+
+
+@pytest.mark.parametrize("with_expert_bias", [True, False])
+def test_expert_mask_creation(with_expert_bias):
+    config = RQwenConfig(
+        seq_len=64,
+        num_layers=2,
+        hidden_dim=16,
+        intermediate_dim=32,
+        num_heads=2,
+        num_kv_heads=2,
+        tie_word_embeddings=True,
+        expert_type=ExpertType.MLP_GLU,
+        expert_init=ExpertInit.NONZERO,  # Experts change output
+        expert_rank=1,
+        num_experts=8,
+        top_k=2,
+        router_act_before_topk=True,
+        # Test with extremely high update rate
+        expert_bias_update_rate=1e6 if with_expert_bias else None,
+    )
+
+    Vocab = hax.Axis("vocab", 100)
+    model: RQwenLMHeadModel = config.build(Vocab, key=jax.random.PRNGKey(0))
+    Batch, Pos = hax.Axis("batch", 1), config.Pos
+    tokens = hax.random.randint(jax.random.PRNGKey(0), (Batch, Pos), 0, Vocab.size)
+    seq_start = 16
+    hs_idxs = -hax.ones_like(tokens)
+    hs_idxs = hs_idxs.at[Batch, 0, Pos, seq_start:].set(seq_start - 1)
+    first_token_mask = hax.zeros_like(tokens).at[Batch, 0, Pos, seq_start].set(1)
+    completion_mask = hax.zeros_like(tokens).at[Batch, 0, Pos, seq_start:].set(1)
+    example = RoutableLmExample(
+        tokens,
+        hax.ones_like(tokens),
+        router_hs_idxs=hs_idxs,
+        completion_mask=completion_mask,
+        completion_first_token_mask=first_token_mask,
+    )
+
+    extras = Extras()
+    expert_bias = None
+    if with_expert_bias:
+        prev_bias = hax.zeros(config.Experts)
+        # Load all but the last top_k. Update bias is high so should select only the last two
+        prev_load = hax.zeros(config.Experts).at[config.Experts, : -config.top_k].set(1.0)
+        expert_bias = ExpertBiasTracker(prev_bias, prev_load)
+        extras.loggable["expert_bias"] = expert_bias
+    router_logits = model.router_logits(Batch, tokens, hs_idxs, example.attn_mask)
+    router_acts = model.router_activation(router_logits, config.Experts).astype(np.float16)
+    mask = model.get_expert_mask(router_logits, hs_idxs, extras, np.float16, expert_bias, example)
+    index_hist: IndexCountHistogram = extras.loggable["router/index_hist"]
+    used_count: IndexCountUnique = extras.loggable["router/used_count"]
+    assert index_hist.hist.bucket_counts.sum().item() == config.top_k  # Only routes one sequence
+    assert used_count.item() == config.top_k  # Only routes one sequence
+    assert ((mask == 0.0) | (mask == router_acts)).all()
+    if with_expert_bias:
+        assert (mask[config.Experts, : -config.top_k] == 0.0).all(), "Only the last top_k should be selected"
+        new_expert_bias: ExpertBiasTracker = extras.aux["expert_bias"]
+        assert (new_expert_bias.prev_bias == expert_bias.curr_bias(config)).all()
+        load = hax.zeros(config.Experts).at[config.Experts, -config.top_k :].set(1.0)
+        assert (new_expert_bias.prev_load == load).all()
 
 
 def test_weight_masks():
