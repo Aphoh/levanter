@@ -563,11 +563,15 @@ def base_weights_mask(model_shape: PyTree) -> PyTree:
 
 
 def routed_model_state_dict(params: PyTree, save_experts_only) -> Dict[str, Any]:
-    model = eqx.filter(
-        params,
-        is_routed_experts_param,
-        is_leaf=lambda x: is_routed_experts_param(x) or isinstance(x, hnn.Linear),
-    ) if save_experts_only else params
+    model = (
+        eqx.filter(
+            params,
+            is_routed_experts_param,
+            is_leaf=lambda x: is_routed_experts_param(x) or isinstance(x, hnn.Linear),
+        )
+        if save_experts_only
+        else params
+    )
     state_dict = to_torch_compatible_state_dict(model)
     return {k: v for k, v in state_dict.items() if v is not None}
 
@@ -575,7 +579,7 @@ def routed_model_state_dict(params: PyTree, save_experts_only) -> Dict[str, Any]
 _sync_count = 0
 
 
-def save_routed_modelS_state_dict(mp: Policy, params: PyTree, path: str, filename: str, save_experts_only=True):
+def save_routed_model_state_dict(mp: Policy, params: PyTree, path: str, filename: str, save_experts_only=True):
     with tempfile.TemporaryDirectory() as tmpdir:
         params = mp.cast_to_compute(params)
         state_dict = routed_model_state_dict(params, save_experts_only)

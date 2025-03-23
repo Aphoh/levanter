@@ -71,6 +71,7 @@ trainer:
   checkpointer:
     base_path: gs://usc2-ckpt/starcoder2-3b-misc
     save_interval: 15m
+  allow_partial_checkpoint: true
   abort_if_loss_above: 8.0
 
 optimizer:

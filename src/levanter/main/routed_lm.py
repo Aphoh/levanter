@@ -1,6 +1,4 @@
-import dataclasses
 import functools
-import gc
 import logging
 from dataclasses import dataclass, field
 from typing import Optional, Type
@@ -207,10 +205,7 @@ def main(config: TrainLmConfig):
     seed = config.trainer.seed
     model_key, data_key, training_key = jrandom.split(jrandom.PRNGKey(seed), 3)
 
-    def model_init():
-        return config.model.build(Vocab, key=model_key)
-
-    model_shape = eqx.filter_eval_shape(model_init)
+    model_shape = eqx.filter_eval_shape(lambda: config.model.build(Vocab, key=model_key))
     is_trainable: PyTree[FilterSpec]
     if config.full_ft:
         is_trainable = True
@@ -293,40 +288,39 @@ def main(config: TrainLmConfig):
         aux_data = None
         if config.model.expert_bias_update_rate:
             aux_data = dict(expert_bias=ExpertBiasTracker.zero(config.model))
+
+        if config.initialize_from_hf:
+            logger.info("Loading model from HF checkpoint")
+            if not config.full_ft:
+                assert (
+                    config.trainer.allow_partial_checkpoint
+                ), "Must allow partial checkpoint for hf initialization, when not full ft"
+            model = converter.load_pretrained(
+                config.model.model_type,
+                config=config.model,
+                axis_mapping=parameter_axis_mapping,
+                dtype=trainer.mp.compute_dtype,
+            )
+            model = named_jit(
+                lambda m: trainer.mp.cast_to_param(reinit_expert_weights(config.model, m, key=model_key)),
+                parameter_axis_mapping,
+            )(model)
+
+            def model_init():
+                return model
+
+        else:
+            logger.info("No HF checkpoint ref found. Init from saved checkpoint or scratch.")
+
+            def model_init():
+                return config.model.build(Vocab, key=model_key)
+
         state = trainer.initial_state(
             training_key, model_init=model_init, is_trainable=is_trainable, aux_data=aux_data
         )
 
-        seek_dataloader = True
         if int(state.step) == 0 and config.initialize_from_checkpoint_path is not None:
             state = load_checkpoint(state, config.initialize_from_checkpoint_path)
-            seek_dataloader = False
-
-        if int(state.step) == 0:
-            # TODO: I don't love that we init the model twice, but it's not a big deal i think?
-            if config.initialize_from_hf:
-                # initialize from an hf pretrained model
-                logger.info(
-                    "No training checkpoint found. Initializing model from HF checkpoint"
-                    f" '{converter.reference_checkpoint}'"
-                )
-                # this is a bit gross, but we want to free up the memory from the model we just built
-                state = dataclasses.replace(state, model=None)
-                gc.collect()
-                model = converter.load_pretrained(
-                    config.model.model_type,
-                    config=config.model,
-                    axis_mapping=parameter_axis_mapping,
-                    dtype=trainer.mp.compute_dtype,
-                )
-                # Loading from HF zeros out all missing weights so...
-                model = named_jit(
-                    lambda m: trainer.mp.cast_to_param(reinit_expert_weights(config.model, m, key=model_key)),
-                    parameter_axis_mapping,
-                )(model)
-                state = dataclasses.replace(state, model=model)
-            else:
-                logger.info("No checkpoint found. Starting from scratch.")
 
         trainable_params = parameter_count(state.trainable_model)
         param_count = parameter_count(state.model)
@@ -350,7 +344,7 @@ def main(config: TrainLmConfig):
         )
 
         train_loader = trainer.data_loader(train_dataset, Batch)
-        if seek_dataloader:
+        if state.step > 0:
             train_loader = train_loader.iter_from_step(state.step)
         else:
             train_loader = iter(train_loader)
@@ -373,7 +367,7 @@ def main(config: TrainLmConfig):
                 last_info.model,
                 config.save_torch_state_path,
                 f"{trainer.run_id}_state_dict.safetensors",
-                save_experts_only=not config.full_ft
+                save_experts_only=not config.full_ft,
             )
 
     # This isn't necessary except when Levanter is run in a subprocess (as happens w/ ray)

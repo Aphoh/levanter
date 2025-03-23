@@ -150,6 +150,7 @@ def test_routed_train(
                     fsdp_axis="embed",
                     batch_axis="batch",
                     tensor_parallel_axes=["mlp", "heads"],
+                    allow_partial_checkpoint=True,
                     mp=jmp.get_policy("p=f32,c=bf16"),
                 ),
                 optimizer=get_opt_cfg(),
@@ -230,6 +231,7 @@ def test_eval_loop(data_cfg):
         require_accelerator=False,
         ray=RayConfig(auto_start_cluster=False),
         mp=jmp.get_policy("p=f32,c=bf16"),
+        allow_partial_checkpoint=True,
     )
     levanter.initialize(trainer_cfg)
     log_result = {}
