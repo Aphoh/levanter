@@ -220,7 +220,9 @@ def main(config: TrainLmConfig):
     optimizer = config.optimizer.build(config.trainer.num_train_steps)
     if config.embedding_router_token_ft:
         token_mask = hax.nn.one_hot(
-            tokenizer.convert_tokens_to_ids(config.data.router_token), Vocab, dtype=jnp.float32
+            tokenizer.convert_tokens_to_ids(config.data.router_token),
+            Vocab,
+            dtype=jnp.float32,
         )
         optimizer = optax.chain(optimizer, filter_embedding_grads(config.model.Embed, Vocab, token_mask))
     if config.full_ft_base_weights_optimizer:
@@ -267,7 +269,10 @@ def main(config: TrainLmConfig):
             total_tokens_future = callbacks.get_total_dataset_tokens(train_dataset, config.model.seq_len)
             trainer.add_hook(
                 callbacks.log_epoch_progress(
-                    total_tokens_future, Pos.size, trainer.config.train_batch_size, max_epochs=config.epoch
+                    total_tokens_future,
+                    Pos.size,
+                    trainer.config.train_batch_size,
+                    max_epochs=config.epoch,
                 ),
                 every=1,
             )
@@ -289,12 +294,10 @@ def main(config: TrainLmConfig):
         if config.model.expert_bias_update_rate:
             aux_data = dict(expert_bias=ExpertBiasTracker.zero(config.model))
 
+        model, model_init = None, None
         if config.initialize_from_hf:
             logger.info("Loading model from HF checkpoint")
-            if not config.full_ft:
-                assert (
-                    config.trainer.allow_partial_checkpoint
-                ), "Must allow partial checkpoint for hf initialization, when not full ft"
+
             model = converter.load_pretrained(
                 config.model.model_type,
                 config=config.model,
@@ -303,20 +306,21 @@ def main(config: TrainLmConfig):
             )
             model = named_jit(
                 lambda m: trainer.mp.cast_to_param(reinit_expert_weights(config.model, m, key=model_key)),
-                parameter_axis_mapping,
+                axis_resources=parameter_axis_mapping,
+                donate_args=True,
             )(model)
-
-            def model_init():
-                return model
-
         else:
             logger.info("No HF checkpoint ref found. Init from saved checkpoint or scratch.")
 
-            def model_init():
+            def model_init():  # noqa
                 return config.model.build(Vocab, key=model_key)
 
         state = trainer.initial_state(
-            training_key, model_init=model_init, is_trainable=is_trainable, aux_data=aux_data
+            training_key,
+            model=model,
+            model_init=model_init,
+            is_trainable=is_trainable,
+            aux_data=aux_data,
         )
 
         if int(state.step) == 0 and config.initialize_from_checkpoint_path is not None:
@@ -329,7 +333,12 @@ def main(config: TrainLmConfig):
 
         if len(config.data.validation_urls) > 0:
             eval_dataset = mk_fim_dataset(
-                config.data, "validation", tokenizer, Pos, key=data_key, await_finished=False
+                config.data,
+                "validation",
+                tokenizer,
+                Pos,
+                key=data_key,
+                await_finished=False,
             )
             trainer.add_eval_hook(eval_dataset)
 
@@ -340,7 +349,8 @@ def main(config: TrainLmConfig):
             (3 if stop_grad else 4) * flops_per_token * Pos.size if flops_per_token is not None else None
         )
         trainer.add_hook(
-            callbacks.log_performance_stats(Pos.size, trainer.config.train_batch_size, flops_per_example), every=1
+            callbacks.log_performance_stats(Pos.size, trainer.config.train_batch_size, flops_per_example),
+            every=1,
         )
 
         train_loader = trainer.data_loader(train_dataset, Batch)
