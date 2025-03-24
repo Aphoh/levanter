@@ -14,6 +14,7 @@ import levanter
 import levanter.main.routed_lm as routed_lm
 import tiny_test_corpus
 from levanter.callbacks import StepInfo
+from levanter.checkpoint import CheckpointerConfig
 from levanter.data.text import FIMUrlSourceConfig, mk_fim_dataset
 from levanter.distributed import RayConfig
 from levanter.models.rotary import DefaultRotaryEmbeddingsConfig
@@ -242,7 +243,12 @@ def test_eval_loop(data_cfg):
     with Trainer(trainer_cfg, opt_cfg.build(2), routed_lm.compute_next_token_loss) as trainer:
         key = PRNGKey(0)
         eval_dset = mk_fim_dataset(
-            data_cfg, "validation", data_cfg.the_tokenizer, model_cfg.Pos, key=key, await_finished=False
+            data_cfg,
+            "validation",
+            data_cfg.the_tokenizer,
+            model_cfg.Pos,
+            key=key,
+            await_finished=False,
         )
         trainer.add_eval_hook(eval_dset, name="eval_hook")
         Vocab = hax.Axis("vocab", len(data_cfg.the_tokenizer))
@@ -260,3 +266,63 @@ def test_eval_loop(data_cfg):
         all_lm_loss = log_result["eval/eval_hook/all_lm_loss"]
         assert np.allclose(comp_loss, eval_loss)
         assert np.allclose(comp_loss, all_lm_loss)
+
+
+def test_resume_checkpoint(data_cfg):
+    from transformers import Qwen2ForCausalLM as TFCausalLm
+
+    model_cfg = small_model_cfg(RQwenConfig)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tokenizer = data_cfg.the_tokenizer
+        hf_config = model_cfg.to_hf_config(tokenizer.vocab_size)
+        torch_model = TFCausalLm(hf_config)
+        torch_model_dir = tmpdir + "/torch_model"
+        torch_model.save_pretrained(torch_model_dir)
+
+        opt_cfg = get_opt_cfg()
+        trainer_cfg = routed_lm.TrainerConfig(
+            seed=42,
+            max_eval_samples=32,
+            per_device_eval_parallelism=1,
+            train_batch_size=4,
+            num_train_steps=8,
+            checkpointer=CheckpointerConfig(base_path=tmpdir),
+            id="random",
+            tracker=NoopConfig(),
+            require_accelerator=False,
+            ray=RayConfig(auto_start_cluster=False),
+            mp=jmp.get_policy("p=f32,c=bf16"),
+            allow_partial_checkpoint=True,
+        )
+        levanter.initialize(trainer_cfg)
+
+        with Trainer(trainer_cfg, opt_cfg.build(8), routed_lm.compute_next_token_loss) as trainer:
+            key = PRNGKey(0)
+            dset = mk_fim_dataset(
+                data_cfg,
+                "train",
+                data_cfg.the_tokenizer,
+                model_cfg.Pos,
+                key=key,
+                await_finished=False,
+            )
+
+            loader = trainer.data_loader(dset, trainer_cfg.TrainBatch)
+            Vocab = hax.Axis("vocab", len(data_cfg.the_tokenizer))
+            state = trainer.initial_state(PRNGKey(1), model_init=lambda: model_cfg.build(Vocab, key=PRNGKey(2)))
+            batch = next(iter(loader))
+            info = trainer.train_step(state, batch)
+            info = trainer.train_step(info.state, batch)
+            checkpointer = trainer_cfg.checkpointer.create(trainer_cfg.id)
+            checkpointer.on_step(info, force=True)
+
+        assert os.path.exists(f"{tmpdir}/{trainer_cfg.id}/step-{info.step}")
+
+        config = routed_lm.TrainLmConfig(
+            initialize_from_hf=torch_model_dir,
+            data=data_cfg,
+            model=model_cfg,
+            trainer=trainer_cfg,
+            optimizer=opt_cfg,
+        )
+        routed_lm.main(config)

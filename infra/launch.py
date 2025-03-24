@@ -27,7 +27,7 @@ def main():
     cli.add_arg(
         parser, config, ["--autodelete"], default=False, action="store_true", help="Delete TPU after job completes."
     )
-    cli.add_arg(parser, config, ["--docker_base_image"], default="ghcr.io/stanford-crfm/levanter-base:latest")
+    cli.add_arg(parser, config, ["--docker_base_image"], default="ghcr.io/aphoh/levanter-base:latest")
     cli.add_arg(parser, config, ["--docker_repository"], default="levanter")
     cli.add_arg(parser, config, ["--foreground"], default=False, action="store_true")
     cli.add_arg(parser, config, ["--image_name"], default=f"levanter-{getpass.getuser()}")

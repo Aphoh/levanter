@@ -25,8 +25,7 @@ classifiers = [
     "Intended Audience :: Science/Research",
 ]
 dependencies = [
-    "haliax==1.4.dev327",
-    "jax==0.4.35",
+    "haliax==1.4.dev341",
     "equinox>=0.11.7",
     "jaxtyping>=0.2.34",
     "tokenizers>=0.15.2",
@@ -41,7 +40,7 @@ dependencies = [
     "braceexpand>=0.1.7",
     "jmp>=0.0.3",
     "fsspec[http]>=2024.2,<2025",
-    "tensorstore>=0.1.65",
+    "tensorstore>=0.1.65,<0.1.70",
     "pytimeparse>=1.1.8",
     "humanfriendly==10.0",
     "safetensors[numpy]>=0.4.2,<0.6.0",
