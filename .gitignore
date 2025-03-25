@@ -159,3 +159,5 @@ local_*.sh
 .benchmarks
 
 logs/
+
+figures/*.pdf
