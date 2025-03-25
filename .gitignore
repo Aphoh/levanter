@@ -160,5 +160,5 @@ local_*.sh
 
 logs/
 
-figures/*.pdf
+figures/**/*.pdf
 **/*.DS_Store
