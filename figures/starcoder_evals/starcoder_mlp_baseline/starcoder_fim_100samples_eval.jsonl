@@ -1,0 +1,40 @@
+{
+  "starcoder_fim": {
+    "py Exact Match": 0.6127037392138063,
+    "pass@1_py": 0.6127037392138063,
+    "pass@5_py": 0.6167766231369032,
+    "pass@10_py": 0.6173605546955706,
+    "pass@20_py": 0.617448261636804,
+    "pass@50_py": 0.6174496644294705,
+    "pass@100_py": 0.6174496644295302,
+    "js Exact Match": 0.7536160487557135,
+    "pass@1_js": 0.7536160487557135,
+    "pass@5_js": 0.7582314431742534,
+    "pass@10_js": 0.7592413002852838,
+    "pass@20_js": 0.7596921701234591,
+    "pass@50_js": 0.7597764266069346,
+    "pass@100_js": 0.7597765363128491,
+    "java Exact Match": 0.7050730337078651,
+    "pass@1_java": 0.7050730337078652,
+    "pass@5_java": 0.716888415909593,
+    "pass@10_java": 0.7183380154768886,
+    "pass@20_java": 0.7189142283984211,
+    "pass@50_java": 0.7190992014324805,
+    "pass@100_java": 0.7191011235955056
+  },
+  "config": {
+    "model": "bigcode/starcoder2-3b",
+    "trust_remote_code": false,
+    "tasks": "starcoder_fim",
+    "limit": null,
+    "n_copies": 100,
+    "load_data_path": null,
+    "prompt": "prompt",
+    "command": "eval",
+    "generations_file": "/dev/shm/code_eval/bigcode-evaluation-harness/data/starcoder/starcoder_mlp_baseline/starcoder_fim_100samples_outputs.jsonl",
+    "allow_code_execution": false,
+    "postprocess": true,
+    "check_references": false,
+    "num_threads": 16
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "ds1000-all-insertion": {
+    "mean pass@1 accuracy (10 samples)": 0.2460355029585799,
+    "pass@1": 0.24603550295857984,
+    "pass@5": 0.2603738142199681,
+    "pass@10": 0.2650887573964497
+  },
+  "config": {
+    "model": "bigcode/starcoder2-3b",
+    "trust_remote_code": false,
+    "tasks": "ds1000-all-insertion",
+    "limit": null,
+    "n_copies": 10,
+    "load_data_path": null,
+    "prompt": "prompt",
+    "command": "eval",
+    "generations_file": "/dev/shm/code_eval/bigcode-evaluation-harness/data/starcoder/starcoder_full_ft_noanneal/ds1000_10samples_outputs.jsonl",
+    "allow_code_execution": false,
+    "postprocess": true,
+    "check_references": false,
+    "num_threads": 16
+  }
+}
