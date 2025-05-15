@@ -1,0 +1,75 @@
+initialize_from_hf: null
+full_ft: true
+embedding_router_token_ft: false
+data:
+  train_urls:
+    - gs://usc-stack-v2/20250122-flattened-shuffled/shard-{00..58}.jsonl.gz
+  validation_urls:
+    - gs://usc-stack-v2/20250122-flattened-shuffled/shard-{59..60}.jsonl.gz
+  cache_dir: "gs://usc2-datacache/20250122-flattened-shuffled/qwen"
+  tokenizer: "Qwen/Qwen2.5-Coder-1.5B"
+  shuffle: false
+  predict_prefix: true
+  predict_router_token: false
+  predict_fim_token: false
+  add_router_token: false
+  pack: true
+  data_format: "flattened"
+model:
+  type: rqwen
+  seq_len: 16384
+  hidden_dim: 896
+  intermediate_dim: 2816
+  num_heads: 7
+  num_layers: 24
+  num_kv_heads: 1
+  layer_norm_epsilon: 1e-6
+  rope:
+    type: default
+    theta: 1000000
+  tie_word_embeddings: true
+
+  use_flash_attention: true
+  attn_backend: splash
+  flash_attention_block_size: 512
+  use_bias: false
+  use_layer_norm_weight: true
+
+  disable_expert_mask: false
+  ident_expert_mask: false
+
+  prefill_expert: true
+  expert_type: "mlp_glu"
+  expert_init: "nonzero"
+  expert_init_scale: 0.01
+
+  num_experts: 128
+  expert_rank: 128
+  top_k: 16
+  scale: 1.0
+
+trainer:
+  wandb:
+    project: "levanter-seqmoe"
+  mp: p=f32,c=bfloat16
+  train_batch_size: 256
+  per_device_parallelism: 2
+  num_train_steps: 2400
+  steps_per_eval: 20
+  max_eval_samples: 512
+  per_device_eval_parallelism: 2
+  tensor_parallel_axes: ["mlp", "heads"]
+  fsdp_axis: "embed"
+  batch_axis: "batch"
+  checkpointer:
+    base_path: gs://usc2-ckpt/qwen-1b-misc
+    save_interval: 15m
+  abort_if_loss_above: 15.0
+
+optimizer:
+  type: adam
+  learning_rate: 6e-3
+  weight_decay: 0.0
+  warmup: 0.01
+
+save_torch_state_path: gs://usc2-ckpt/rqwen-0.5b-pt-state-dicts
