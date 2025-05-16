@@ -1,6 +1,6 @@
 import dataclasses
 import typing
-from typing import TYPE_CHECKING, Callable, Dict, Generic, Optional, Tuple, TypeVar
+from typing import TYPE_CHECKING, Callable, Dict, Generic, Optional, TypeVar
 
 import equinox as eqx
 import jax
@@ -61,7 +61,7 @@ class TrainerState(eqx.Module, Generic[M]):
     is_trainable: FilterTree = eqx.field(static=True)
     mp: jmp.Policy = eqx.field(static=True)
 
-    model_averaging: ModelAveraging[M] | None = None
+    model_averaging: ModelAveraging[M]
 
     aux_data: AuxData | None = None
     """Aux data that should be saved with the trainer. Initial use case is for deepseekmoe's loss-free expert balancing"""
@@ -105,7 +105,7 @@ class TrainerState(eqx.Module, Generic[M]):
         key: PRNGKeyArray,
         is_trainable: FilterTree = True,
         mp: Optional[jmp.Policy] = None,
-        quantization: QuantizationConfig = None,
+        quantization: Optional[QuantizationConfig] = None,
         model_averaging: ModelAveragingConfig[M] | None = None,
         **kwargs,
     ) -> "TrainerState[M]":
@@ -137,9 +137,9 @@ class TrainerState(eqx.Module, Generic[M]):
             **kwargs,
         )
 
-    def take_step(self: S, grads: PyTree, obj_fun: Optional[Callable[[M], Scalar]] = None) -> S:
+    def take_step(self: S, grads: PyTree, obj_fun: Optional[Callable[[M], Scalar]] = None) -> tuple[S, M]:
         assert isinstance(self, TrainerState)  # make mypy happy
-        model, opt_state = take_train_step(
+        model, opt_state, updates = take_train_step(
             self.optimizer,
             self.model,
             self.opt_state,
@@ -153,7 +153,21 @@ class TrainerState(eqx.Module, Generic[M]):
         else:
             ma = None
 
-        return dataclasses.replace(self, model=model, opt_state=opt_state, model_averaging=ma, step=self.step + 1)
+        return (
+            dataclasses.replace(self, model=model, opt_state=opt_state, model_averaging=ma, step=self.step + 1),
+            updates,
+        )
+
+
+class InsideJitInfo(eqx.Module, Generic[M]):
+    """
+    This class holds intermediate state that is tracked inside a JIT-compiled function. It is primarily used for
+    [levanter.callbacks.JitCallback][] to store the gradients, updates, and other information that a callback might need
+    to access.
+    """
+
+    grads: M
+    updates: M
 
 
 def init_optimizer_for_trainables(optimizer, trainable_model):
@@ -227,14 +241,30 @@ def take_train_step(
     *,
     obj_fun: Optional[Callable[[M], Scalar]] = None,
     is_trainable: FilterTree = True,
-) -> Tuple[M, OptState]:
+) -> tuple[M, OptState, M]:
+    """
+
+    Takes a single training step for the model using the provided optimizer and gradients. This function takes into account:
+    - The optimizer to update the model parameters based on the gradients.
+    - The model parameters that are trainable based on the provided filter.
+    - The optional objective function for Sophia, etc.
+    - quantized state updates (Gradient Overwrite) if applicable.
+
+    Returns:
+    - The updated model after applying the optimizer updates.
+    - The updated optimizer state.
+    - The updates that were applied to the model parameters.
+
+    """
     train_grads = trainables_only(grads, is_trainable)
     overwrites, train_grads = partition_for_grad_overwrite(train_grads)
     trainable_model = trainables_only(model, is_trainable)
+    _, trainable_model = partition_for_grad_overwrite(trainable_model)
+
     updates, opt_state = optimizer.update(train_grads, opt_state, params=trainable_model, obj_fn=obj_fun)
     model = apply_updates(model, updates, overwrites)
 
-    return model, opt_state
+    return model, opt_state, updates
 
 
 def make_floating_point_trainable_filter(is_trainable: FilterTree) -> FilterTree:

@@ -252,7 +252,12 @@ def auto_ray_cluster(
                             logger.info(f"Successfully started ray head on port {ray_port}.")
 
                         # install an atexit handler to kill the head when we exit
-                        atexit.register(lambda: os.system("ray stop -g 10 --force &> /dev/null"))
+                        def kill_ray():
+                            print("Hi", flush=True)
+                            os.system("ray stop -g 10 --force &> /dev/null")
+                            print("done", flush=True)
+
+                        atexit.register(kill_ray)
                     elif start_workers:
                         logger.info(
                             f"Starting ray worker and connecting to {address}. We are process {jax.process_index()}."
@@ -320,7 +325,9 @@ class DistributedConfig:
                 if coordinator_address is None:
                     coordinator_address = LevanterSlurmCluster.get_coordinator_address()
 
-            jax.distributed.initialize(coordinator_address, self.num_processes, self.process_id, device_ids)
+            jax.distributed.initialize(
+                coordinator_address, self.num_processes, self.process_id, device_ids, initialization_timeout=30 * 60
+            )
             logger.info(
                 f"Initialized jax.distributed with {jax.device_count()} devices, {jax.process_count()} processes,"
                 f" coordinator_address={coordinator_address}, process_id={self.process_id}, my"

@@ -48,10 +48,12 @@ def test_mean_scalar():
     rmacc = RunningMean.zeros_like(jnp.array(0))
 
     for i in range(AccumStep.size):
+        print(acc.item())
         wi = where[AccumStep, i]
         mean_scalar = MeanScalar.init(arr[AccumStep, i], where=wi)
         acc += mean_scalar
         rmacc += RunningMean(arr[AccumStep, i].mean(where=wi), wi.sum())
 
+    print(acc.item(), arr.mean(where=where).item())
     assert jnp.allclose(acc.item(), arr.mean(where=where).item())
     assert jnp.allclose(rmacc.item(), arr.mean(where=where).item())

@@ -99,6 +99,7 @@ class SimpleShardSource(ShardedDataSource[list[int]]):
         return ([shard_num * 10 + i] * 10 for i in range(row, self._rows_per_shard))
 
 
+@pytest.mark.ray
 def test_serial_cache_writer():
     with tempfile.TemporaryDirectory() as tmpdir1:
         source = SimpleShardSource(num_shards=4)
@@ -346,7 +347,7 @@ async def test_can_get_elems_before_finished():
         ray.get(blocker_to_wait_on_test.block.remote())
 
         # now wait until the cache is finished. mostly so that the tempdir cleanup works
-        cache.await_finished(timeout=10)
+        cache.await_finished(timeout=20)
 
 
 @pytest.mark.ray

@@ -319,10 +319,11 @@ This will show you a list of files and directories in the repo, sorted by size, 
 
 ### Automatic Setup
 
+!!! warning
+    This approach is deprecated and will be removed in the future. Please use `launch.py` or `launch_on_ray.py` instead.
+
 You can use `infra/spin-up-vm.sh` to create a TPU VM instance. In addition to creating the instance, it will set up
 the venv on each worker, and it will clone the repo to `~/levanter/`.
-
-**For Public Users**:
 
 ```bash
 bash infra/spin-up-vm.sh <name> -z <zone> -t <type> -n <subnetwork> [--preemptible] [--use-alpha]

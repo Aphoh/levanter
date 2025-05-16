@@ -62,6 +62,8 @@ class DomainTaggedDataset(AsyncDataset[tuple[T, hax.NamedArray]]):
     ):
         super().__init__()
         self.datasets = []
+        self._max_examples_per_dataset = max_examples_per_dataset
+
         tag_index: dict[str, int] = {}
         for i, (dataset, tags) in enumerate(datasets):
             if not tags and len(datasets) > 1:
@@ -71,14 +73,15 @@ class DomainTaggedDataset(AsyncDataset[tuple[T, hax.NamedArray]]):
                 if tag not in tag_index:
                     tag_index[tag] = len(tag_index)
 
+            if self._max_examples_per_dataset:
+                dataset = dataset.take(self._max_examples_per_dataset)
+
             self.datasets.append((dataset, tags))
 
         self.tag_to_index = tag_index
         self.Tag = hax.Axis("tag", len(self.tag_to_index))
-        self.max_examples_per_dataset = max_examples_per_dataset
         self._tag_arrays = self._compute_tag_arrays()
         self._offsets: Optional[np.ndarray] = None
-        self._max_examples_per_dataset = max_examples_per_dataset
 
     async def _get_offsets(self) -> np.ndarray:
         if self._offsets is None:
@@ -115,12 +118,12 @@ class DomainTaggedDataset(AsyncDataset[tuple[T, hax.NamedArray]]):
         offsets = await self._get_offsets()
         original_order = np.argsort(indices)
         sorted_indices = np.array(indices)[original_order]
-        dataset_indices = np.searchsorted(offsets, sorted_indices, side="right") - 1
+        dataset_indices = (np.searchsorted(offsets, sorted_indices, side="right") - 1).tolist()
 
         # Group indices by the dataset they belong to
         grouped_indices = defaultdict(list)
         for idx, dataset_index in zip(sorted_indices, dataset_indices):
-            grouped_indices[dataset_index].append(idx - offsets[dataset_index])
+            grouped_indices[dataset_index].append(int(idx - offsets[dataset_index]))
 
         # Retrieve the batch for each group
         batch_futures: list = []
@@ -163,6 +166,8 @@ def cb_tagged_lm_evaluate(
     device_mesh: Optional[Mesh] = None,
     axis_mapping: ResourceMapping = None,
     max_examples_per_dataset: Optional[int] = None,
+    eval_current: bool = True,
+    eval_ema: bool = True,
     prefix: str = "eval",
     mp: jmp.Policy = None,
     loss_fn=compute_next_token_loss,
@@ -187,6 +192,8 @@ def cb_tagged_lm_evaluate(
         axis_mapping: The axis mapping to use for evaluation
         max_examples_per_dataset: The maximum number of examples to use from each dataset
         prefix: The prefix to use for logging the losses
+        eval_current: Whether to evaluate the model's current parameters
+        eval_ema: Whether to evaluate the EMA model (or other model averaged model)
     """
 
     evaluator = TaggedEvaluator(
@@ -200,57 +207,76 @@ def cb_tagged_lm_evaluate(
         loss_fn=loss_fn,
     )
 
+    if not eval_current and not eval_ema:
+        raise ValueError("At least one of eval_current or eval_ema should be True")
+
     def eval_callback(step: StepInfo):
-        with levanter.tracker.capture_time() as time_fn:
-            result = evaluator.evaluate(step.eval_model)
+        step_count = step.step
 
-        log_dict = {
-            # log micro average as just "loss"
-            _join_prefix(prefix, "loss"): result.micro_avg_loss,
-            _join_prefix(prefix, "loading_time"): result.total_eval_loading_time,
-            _join_prefix(prefix, "total_time"): time_fn(),
-        }
+        if eval_current:
+            log_dict = eval_model(evaluator, step.model, prefix=prefix)
+            levanter.tracker.log(log_dict, step=step_count)
 
-        logger.info(f"{prefix} loss: {result.micro_avg_loss:.3f}")
-        has_tags = len(evaluator.dataset.tag_to_index) > 1  # 1 tag means there's no difference between micro and macro
-        if has_tags:
-            log_dict[_join_prefix(prefix, "macro_loss")] = result.macro_avg_loss
+        if not eval_current and step.state.model_averaging is None:
+            raise ValueError("Cannot evaluate EMA model without model averaging, but you only want to evaluate EMA")
 
-            for tag, loss in result.tag_macro_losses.items():
-                # don't log leaf tag macro losses because it doesn't mean anything different than micro loss
-                if tag in evaluator.dataset.tag_to_index:
-                    continue
-                if not tag:
-                    continue
-                log_dict[_join_prefix(prefix, tag) + "/macro_loss"] = loss
-                logger.info(f"{tag} macro loss: {loss:.3f}")
+        if eval_ema and step.state.model_averaging is not None:
+            log_dict = eval_model(evaluator, step.eval_model, prefix=_join_prefix(prefix, "ema"))
+            levanter.tracker.log(log_dict, step=step_count)
 
-        for tag, loss in result.tag_micro_losses.items():
-            if not tag:
-                continue
-            if tag in evaluator.dataset.tag_to_index:
-                log_dict[_join_prefix(prefix, tag) + "/loss"] = loss
-                logger.info(f"{tag} loss: {loss:.3f}")
-            else:
-                log_dict[_join_prefix(prefix, tag) + "/micro_loss"] = loss
-                logger.info(f"{tag} micro loss: {loss:.3f}")
-
-        if tokenizer is not None:
-            log_dict[_join_prefix(prefix, "bpb")] = result.micro_bpb
-            if has_tags:
-                log_dict[_join_prefix(prefix, "macro_bpb")] = result.macro_bpb
-            for tag, bpb in result.tag_micro_bpb.items():
-                log_dict[_join_prefix(prefix, tag) + "/bpb"] = bpb
-
-            if has_tags:
-                for tag, bpb in result.tag_macro_bpb.items():
-                    log_dict[_join_prefix(prefix, tag) + "/macro_bpb"] = bpb
-
-        levanter.tracker.log(log_dict, step=step.step)
-
-        return result
+        return
 
     return eval_callback
+
+
+def eval_model(evaluator: "TaggedEvaluator", model: LmHeadModel, prefix: str = "") -> dict[str, float]:
+    with levanter.tracker.capture_time() as time_fn:
+        result = evaluator.evaluate(model)
+    log_dict = _construct_log_dict(evaluator, result, time_fn(), prefix=prefix)
+    return log_dict
+
+
+def _construct_log_dict(evaluator, eval_result, total_time, prefix):
+    tokenizer = evaluator.tokenizer
+    log_dict = {
+        # log micro average as just "loss"
+        _join_prefix(prefix, "loss"): eval_result.micro_avg_loss,
+        _join_prefix(prefix, "loading_time"): eval_result.total_eval_loading_time,
+        _join_prefix(prefix, "total_time"): total_time,
+    }
+    logger.info(f"{prefix} loss: {eval_result.micro_avg_loss:.3f}")
+    has_tags = len(evaluator.dataset.tag_to_index) > 1  # 1 tag means there's no difference between micro and macro
+    if has_tags:
+        log_dict[_join_prefix(prefix, "macro_loss")] = eval_result.macro_avg_loss
+
+        for tag, loss in eval_result.tag_macro_losses.items():
+            # don't log leaf tag macro losses because it doesn't mean anything different than micro loss
+            if tag in evaluator.dataset.tag_to_index:
+                continue
+            if not tag:
+                continue
+            log_dict[_join_prefix(prefix, tag) + "/macro_loss"] = loss
+            logger.info(f"{tag} macro loss: {loss:.3f}")
+    for tag, loss in eval_result.tag_micro_losses.items():
+        if not tag:
+            continue
+        if tag in evaluator.dataset.tag_to_index:
+            log_dict[_join_prefix(prefix, tag) + "/loss"] = loss
+            logger.info(f"{tag} loss: {loss:.3f}")
+        else:
+            log_dict[_join_prefix(prefix, tag) + "/micro_loss"] = loss
+            logger.info(f"{tag} micro loss: {loss:.3f}")
+    if tokenizer is not None:
+        log_dict[_join_prefix(prefix, "bpb")] = eval_result.micro_bpb
+        if has_tags:
+            log_dict[_join_prefix(prefix, "macro_bpb")] = eval_result.macro_bpb
+        for tag, bpb in eval_result.tag_micro_bpb.items():
+            log_dict[_join_prefix(prefix, tag) + "/bpb"] = bpb
+
+        if has_tags:
+            for tag, bpb in eval_result.tag_macro_bpb.items():
+                log_dict[_join_prefix(prefix, tag) + "/macro_bpb"] = bpb
+    return log_dict
 
 
 class TaggedEvaluator:
@@ -279,8 +305,8 @@ class TaggedEvaluator:
         self.EvalBatch = EvalBatch
         self.dataset = DomainTaggedDataset(tagged_eval_sets, max_examples_per_dataset)
         self.loader = DataLoader(
-            EvalBatch,
             self.dataset.as_async_dataset(),
+            EvalBatch,
             max_buffered_batches=100,
             mesh=device_mesh,
             axis_resources=axis_mapping,
@@ -302,14 +328,20 @@ class TaggedEvaluator:
 
         self.hierarchy = hierarchy
 
-        @hax.named_jit(out_axis_resources=axis_mapping)
+        @hax.named_jit
         def accum_for_batch(m: LmHeadModel, state: _EvalRunningMeans, batch: LmExample, tags: hax.NamedArray):
             m = inference_mode(m, True)
 
             if self.mp is not None:
                 m = self.mp.cast_to_compute(m)
 
-            with hax.axis_mapping(axis_mapping):
+            from contextlib import ExitStack
+
+            context = ExitStack()
+
+            with context:
+                if axis_mapping is not None:
+                    context.enter_context(hax.axis_mapping(axis_mapping))
                 losses, mask, _extras = compute_next_token_loss(m, batch)
                 this_tokens = hax.sum(mask)
                 this_loss = hax.einsum("->", losses, mask)  # to scalar
@@ -328,7 +360,9 @@ class TaggedEvaluator:
                     state = dataclasses.replace(state, loss_per_tag=mean_per_tag)
 
                 if self.bytes_per_token is not None:
-                    next_tokens = hax.roll(batch.tokens, -1, m.Pos)  # [Batch, Pos], rolled by 1 for next token task
+                    next_tokens = hax.roll(
+                        batch.tokens, -1, m.Pos.name
+                    )  # [Batch, Pos], rolled by 1 for next token task
                     bytes_per_pos = self.bytes_per_token.take("vocab", next_tokens)  # [Batch, Pos]
                     bytes_per_tag = hax.einsum("-> tag", mask, bytes_per_pos, tags)  # [Tag]
                     this_bytes = hax.einsum("->", bytes_per_pos, mask)  # Scalar
@@ -358,7 +392,7 @@ class TaggedEvaluator:
         iterator = LoadingTimeTrackerIterator(self.loader)
         n = 0
 
-        for batch, tags in tqdm(iterator, "eval"):
+        for batch, tags in tqdm(iterator, "eval", total=len(self.loader)):
             state = self.accum_for_batch(m, state, batch, tags)
             n += 1
 

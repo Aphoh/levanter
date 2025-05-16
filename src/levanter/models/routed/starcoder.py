@@ -15,7 +15,6 @@ from haliax.state_dict import ModuleWithStateDictSerialization
 
 from levanter.compat.hf_checkpoints import HFCheckpointConverter
 from levanter.models.attention import AttentionMask, dot_product_attention
-from levanter.models.gpt2 import ACT2FN
 from levanter.models.llama import LlamaConfig, LlamaEmbedding
 from levanter.models.lm_model import LmHeadModel
 from levanter.models.rotary import RotaryEmbeddingsConfig
@@ -29,6 +28,7 @@ from levanter.models.routed.common import (
     Router,
     make_linear,
 )
+from levanter.utils import activation
 from levanter.utils.flop_utils import lm_flops_per_token
 from levanter.utils.logging import silence_transformer_nag
 
@@ -240,7 +240,7 @@ class RStarcoderMlp(ModuleWithStateDictSerialization):
         Embed: Axis,
         Mlp: Axis,
         Inter: AxisSpec,
-        activation_fn: Union[str, Callable],
+        activation_fn: Callable,
         *,
         key,
         scale: float = 1.0,
@@ -253,14 +253,11 @@ class RStarcoderMlp(ModuleWithStateDictSerialization):
         c_proj = make_linear(
             config, Out=Embed, In=Mlp, Inter=Inter, scale=scale, key=k_proj, use_bias=use_bias, out_first=True
         )
-        if isinstance(activation_fn, str):
-            activation_fn = ACT2FN[activation_fn]
-        act = activation_fn  # type: ignore
         experts = None
         if config.expert_type in [ExpertType.MLP, ExpertType.MLP_GLU]:
             experts = RoutedMlpExperts.init(config, key=k_mlp_exp)
 
-        return RStarcoderMlp(c_fc, c_proj, experts, act)
+        return RStarcoderMlp(c_fc, c_proj, experts, activation_fn)
 
     @named_call
     def __call__(self, x: NamedArray, expert_mask: Optional[NamedArray], *, key=None) -> NamedArray:
@@ -305,7 +302,7 @@ class RStarcoderDecoderLayer(eqx.Module):
             config.Embed,
             config.Mlp,
             (config.Experts, config.ExpertRank),
-            config.activation_function,
+            activation.TO_FN[config.activation_function],
             scale=config.scale,
             key=k_mlp,
             use_bias=config.use_bias,

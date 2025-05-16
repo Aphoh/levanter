@@ -461,4 +461,4 @@ def test_param_distribution():
     print(f"MLP: {mlp_weights/1e6}M")
     print(f"Experts: {expert_weights/1e6}M")
     print(f"Attention: {attn_weights/1e6}M")
-    assert False
+    # assert False

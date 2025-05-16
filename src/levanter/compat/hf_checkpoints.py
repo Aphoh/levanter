@@ -22,11 +22,13 @@ import mergedeep
 import safetensors
 import safetensors.numpy
 import transformers.utils.hub
+from fsspec import AbstractFileSystem
 from huggingface_hub import HfApi, hf_hub_download, repo_exists, snapshot_download
+from huggingface_hub.file_download import repo_folder_name
 from huggingface_hub.utils import EntryNotFoundError, GatedRepoError, HFValidationError, RepositoryNotFoundError
 from jax.experimental.multihost_utils import sync_global_devices
 from jax.random import PRNGKey
-from jaxtyping import Array
+from jaxtyping import Array, PRNGKeyArray
 from tqdm import tqdm
 
 import haliax
@@ -41,6 +43,7 @@ from levanter.utils import jax_utils
 from levanter.utils.cloud_utils import temp_dir_before_upload
 from levanter.utils.hf_utils import HfTokenizer
 from levanter.utils.jax_utils import best_effort_sharding, local_cpu_mesh, use_cpu_device
+from levanter.utils.json_utils import ConfigJSONEncoder
 from levanter.utils.logging import silence_transformer_nag
 from levanter.utils.py_utils import dataclass_with_default_init, logical_cpu_memory_size
 
@@ -145,7 +148,7 @@ class ModelWithHfSerializationMixin(Generic[MConfig]):
 
     @classmethod
     @abc.abstractmethod
-    def init(cls, Vocab: Axis, config: MConfig, *, key: PRNGKey) -> "ModelWithHfSerializationMixin":
+    def init(cls, Vocab: Axis, config: MConfig, *, key: PRNGKeyArray) -> "ModelWithHfSerializationMixin":
         pass
 
 
@@ -156,7 +159,7 @@ class ASRWithHfSerializationMixin(ASRMixin, ModelWithHfSerializationMixin[MConfi
 class LmWithHfSerializationMixin(LmHeadModel, ModelWithHfSerializationMixin[MConfig]):
     @classmethod
     @abc.abstractmethod
-    def init(cls, Vocab: Axis, config: MConfig, *, key: PRNGKey) -> "LmWithHfSerializationMixin":
+    def init(cls, Vocab: Axis, config: MConfig, *, key: PRNGKeyArray) -> "LmWithHfSerializationMixin":
         pass
 
 
@@ -435,10 +438,19 @@ class HFCheckpointConverter(Generic[LevConfig]):
         return ref.model_name_or_path, ref.revision
 
     def load_state_dict(self, ref: Optional[Union[str, RepoRef]] = None, dtype: Optional[jnp.dtype] = None) -> dict:
+        """Load a state dict from either HF Hub or a GCS path"""
         if ref is None:
             ref = self.reference_checkpoint
         if ref is None:
             raise ValueError("Must provide a checkpoint to load from")
+
+        # Handle GCS paths directly
+        if isinstance(ref, RepoRef) and ref.model_name_or_path.startswith("gs://"):
+            logger.info("\n\n loading hf from GCS! \n\n")
+            return self._load_from_gcs(ref.model_name_or_path, dtype)
+        elif isinstance(ref, str) and ref.startswith("gs://"):
+            logger.info("\n\n loading hf from GCS! \n\n")
+            return self._load_from_gcs(ref, dtype)
 
         id, rev = self._get_ref(ref)
 
@@ -497,6 +509,52 @@ class HFCheckpointConverter(Generic[LevConfig]):
                 final_state_dict.update(shard_state_dict)
 
         return final_state_dict
+
+    def _load_from_gcs(self, gcs_path: str, dtype: Optional[jnp.dtype] = None) -> dict:
+        """Load a state dict from a GCS path"""
+        fs: AbstractFileSystem
+        fs, path = fsspec.core.url_to_fs(gcs_path)
+
+        # First try to load sharded checkpoint
+        for index_file in [SAFE_TENSORS_INDEX_NAME, PYTORCH_WEIGHTS_INDEX_NAME]:
+            index_path = os.path.join(path, index_file)
+            if fs.exists(index_path):
+                with fs.open(index_path, "r") as f:
+                    index = json.load(f)
+
+                shard_files = list(set(index["weight_map"].values()))
+                final_state_dict = {}
+
+                if "safetensors" in index_file:
+                    loader = _load_safe_tensors
+                else:
+                    loader = _load_torch
+
+                for shard_file in shard_files:
+                    shard_path = os.path.join(path, shard_file)
+                    if not fs.exists(shard_path):
+                        raise FileNotFoundError(f"Shard file {shard_path} not found")
+
+                    # Download shard to temporary file
+                    with tempfile.NamedTemporaryFile() as tmp:
+                        fs.get(shard_path, tmp.name)
+                        shard_state_dict = loader(tmp.name, dtype)
+                        final_state_dict.update(shard_state_dict)
+
+                return final_state_dict
+
+        # If no index file found, try loading single file checkpoint
+        for model_file in [SAFE_TENSORS_MODEL, PYTORCH_MODEL]:
+            model_path = os.path.join(path, model_file)
+            if fs.exists(model_path):
+                with tempfile.NamedTemporaryFile() as tmp:
+                    fs.get(model_path, tmp.name)
+                    if model_file == SAFE_TENSORS_MODEL:
+                        return _load_safe_tensors(tmp.name, dtype)
+                    else:
+                        return _load_torch(tmp.name, dtype)
+
+        raise FileNotFoundError(f"No checkpoint files found in {gcs_path}")
 
     def load_pretrained(
         self,
@@ -681,7 +739,7 @@ class HFCheckpointConverter(Generic[LevConfig]):
             dict_config = mergedeep.merge({}, dict_config, self.config_overrides)
 
         with open(os.path.join(path, "config.json"), "w") as f:
-            json.dump(dict_config, f)
+            json.dump(dict_config, f, cls=ConfigJSONEncoder)
 
         # Model
         state_dict = to_torch_compatible_state_dict(model)
@@ -1101,11 +1159,22 @@ def _patch_hf_hub_download():
             """
             repo_id = kwargs.get("repo_id", args[0] if len(args) > 0 else None)
             filename = kwargs.get("filename", args[1] if len(args) > 1 else None)
+            cache_dir = kwargs.get("cache_dir", tmpdir)
+            repo_type = kwargs.get("repo_type")
+            revision = kwargs.get("revision")
+            if repo_type is None:
+                repo_type = "model"
+
+            if revision is None:
+                revision = "main"
 
             if repo_id and filename and _is_url_like(repo_id):
                 fs, path = fsspec.core.url_to_fs(repo_id)
                 remote_path = os.path.join(path, filename)
-                local_path = os.path.join(tmpdir, filename)
+                # local_path = os.path.join(tmpdir, filename)
+                local_path = os.path.join(
+                    cache_dir, repo_folder_name(repo_id=repo_id, repo_type=repo_type), "snapshots", revision, filename
+                )
 
                 if not fs.exists(remote_path):
                     raise EntryNotFoundError(f"File {remote_path} not found")
@@ -1119,8 +1188,20 @@ def _patch_hf_hub_download():
         # Monkeypatch hf_hub_download
         transformers.utils.hub.hf_hub_download = custom_hf_hub_download
 
+        # we also need to monkeypatch huggingface_hub/utils/_validators.py:106 validate_repo_id
+        # to allow fsspec paths
+        original_validate_repo_id = huggingface_hub.utils._validators.validate_repo_id
+
+        def custom_validate_repo_id(repo_id):
+            if _is_url_like(repo_id):
+                return
+            return original_validate_repo_id(repo_id)
+
+        huggingface_hub.utils._validators.validate_repo_id = custom_validate_repo_id
+
         try:
             yield custom_hf_hub_download
         finally:
             # Restore the original implementation
             transformers.utils.hub.hf_hub_download = original_hf_hub_download
+            huggingface_hub.utils._validators.validate_repo_id = original_validate_repo_id

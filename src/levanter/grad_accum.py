@@ -30,7 +30,7 @@ X = TypeVar("X", contravariant=True)  # Input
 def microbatched(
     loss_fn: ComputeLossFunction[M_con, X],
     Batch: Axis,
-    microbatch_size: int,
+    microbatch_size: int | None,
     accum_axis_mapping,
     compute_axis_mapping,
     patch_in_rng_key: Optional[str] = "key",
@@ -69,12 +69,7 @@ def microbatched(
     physical_axis_name = hax.partitioning.physical_axis_name(Batch, compute_axis_mapping)
     assert physical_axis_name is not None
 
-    if microbatch_size <= 0:
-        raise ValueError(f"Bad value for {microbatch_size=}")
-
-    num_micro_steps = batch_size // microbatch_size
-
-    if num_micro_steps == 1:
+    if batch_size == microbatch_size or microbatch_size is None:
 
         @functools.wraps(loss_fn)
         def no_accum_loss_fn(*args, **kwargs):
@@ -83,6 +78,11 @@ def microbatched(
             return hax.mean(losses, where=where).scalar(), extras
 
         return eqx.filter_value_and_grad(no_accum_loss_fn, has_aux=True)
+
+    if microbatch_size <= 0:
+        raise ValueError(f"Bad value for {microbatch_size=}")
+
+    num_micro_steps = batch_size // microbatch_size
 
     Microbatch = Batch.resize(microbatch_size)
     AccumStep = Axis("accum_step", num_micro_steps)

@@ -94,8 +94,8 @@ def test_large_prefetch():
         dataset = mk_fim_dataset(cfg, "train", tokenizer, Pos, key=PRNGKey(0))
         tc = TrainerConfig()
         loader = DataLoader(
-            tc.TrainBatch,
             dataset,
+            tc.TrainBatch,
             max_buffered_batches=128,
             mesh=tc.device_mesh,
             axis_resources=tc.compute_axis_mapping,

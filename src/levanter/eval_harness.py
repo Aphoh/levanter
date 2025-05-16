@@ -31,16 +31,18 @@ import jax.numpy as jnp
 import jmp
 import numpy as np
 from jax.sharding import PartitionSpec
-from optax.tree_utils import tree_zeros_like
 
 import haliax
 from haliax import NamedArray
 
 import levanter.tracker
 from levanter.compat.hf_checkpoints import HFCheckpointConverter, load_tokenizer
-from levanter.data.loader import stack_tree
-from levanter.data.packing import PromptCompletion, pack_prompt_completions, per_segment_correct, per_segment_loss
-from levanter.models.attention import AttentionMask
+from levanter.data.packing import (
+    PromptCompletion,
+    greedy_pack_prompt_completions,
+    per_segment_correct,
+    per_segment_loss,
+)
 from levanter.models.gpt2 import Gpt2Config
 from levanter.models.loss import next_token_loss
 from levanter.utils.background_iterable import BackgroundIterator
@@ -63,10 +65,12 @@ import haliax as hax
 from haliax.partitioning import ResourceMapping, round_axis_for_partitioning
 
 import levanter.config
+from levanter.callbacks import StepInfo
 from levanter.checkpoint import load_checkpoint
 from levanter.data import batched
+from levanter.data.loader import stack_batches
 from levanter.models.lm_model import LmConfig, LmExample, LmHeadModel
-from levanter.trainer import StepInfo, TrainerConfig
+from levanter.trainer import TrainerConfig
 from levanter.utils.jax_utils import broadcast_shard, use_cpu_device
 from levanter.utils.tree_utils import inference_mode
 
@@ -253,17 +257,19 @@ class LevanterHarnessLM(LM):
             logger.warning("No pad token set. Setting to eos token.")
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-        packed_iterator = _pack_requests(requests, self.tokenizer, self.EvalPos, self.leader.max_packed_segments)
-        packed_iterator = self.stack_batches(packed_iterator, self.EvalBatch)
+        packed = _pack_requests(requests, self.tokenizer, self.EvalPos, self.leader.max_packed_segments)
+        packed_iterator = stack_batches(iter(packed), self.EvalPos, self.EvalBatch)
         packed_iterator = BackgroundIterator(packed_iterator, max_capacity=1024)
 
         result_probs = np.zeros(len(requests))
         result_greedy = np.zeros(len(requests))
         covered_points = np.zeros(len(requests), dtype=bool)
 
+        total_tokens_expected = len(packed) * self.EvalPos.size
+
         total_padding = 0
-        total_tokens = 0
-        pbar = tqdm(total=len(requests), desc="Loglikelihood", unit="req")
+        total_tokens_seen = 0
+        pbar = tqdm(total=total_tokens_expected, desc="loglikelihood", unit="tok")
         for q, batch in enumerate(packed_iterator):
             segments_this_batch = _get_segments_this_batch(
                 batch, self.leader.max_packed_segments * self.EvalBatch.size
@@ -291,13 +297,13 @@ class LevanterHarnessLM(LM):
             covered_points[out_ids[valid_indices]] = True
 
             total_padding += padding_count
-            total_tokens += batch_tokens
+            total_tokens_seen += batch_tokens
 
             pbar.set_postfix(
-                padding=f"{total_padding}/{total_tokens} = {(total_padding) / (total_tokens):.2f}",
+                padding=f"{total_padding}/{total_tokens_seen} = {(total_padding) / (total_tokens_seen):.2f}",
                 this_padding=f"{padding_count}/{batch_tokens}= {padding_count / batch_tokens:.2f}",
             )
-            pbar.update(len(segments_this_batch))
+            pbar.update(batch_tokens)
 
         missing_points = np.where(~covered_points)[0]
         assert len(missing_points) == 0, f"Missing points: {missing_points}"
@@ -306,31 +312,6 @@ class LevanterHarnessLM(LM):
         logger.info(f"Finished running {len(requests)} loglikelihoods.")
 
         return result
-
-    def stack_batches(self, example_iterator, EvalBatch):
-        """
-        Stack examples from an iterator into a batch.
-
-        Args:
-            EvalBatch: The batch axis.
-            example_iterator: An iterator of examples.
-
-        Returns:
-            A batch of examples.
-        """
-        with use_cpu_device():
-            for batch in batched(example_iterator, EvalBatch.size):
-                if len(batch) < EvalBatch.size:
-                    dummy_instance = self._make_dummy_instance(batch)
-                    batch.extend([dummy_instance] * (EvalBatch.size - len(batch)))
-                yield stack_tree(EvalBatch, batch)
-
-    def _make_dummy_instance(self, batch):
-        dummy_instance: LmExample = tree_zeros_like(batch[0])
-        dummy_segment_mask = hax.full(self.EvalPos, -1, dtype=jnp.int32)
-        dummy_attn = AttentionMask.causal().with_segment_ids(dummy_segment_mask)
-        dummy_instance = dataclasses.replace(dummy_instance, attn_mask=dummy_attn)
-        return dummy_instance
 
     def loglikelihood_rolling(self, requests) -> List[Tuple[float]]:
         raise NotImplementedError()
@@ -392,7 +373,7 @@ class LmEvalHarnessConfig:
     max_examples: int | None = None
     max_eval_length: int | None = None
     log_samples: bool = False
-    bootstrap_iters: int = 0  # set to 0 see if this makes it not hang randomly
+    bootstrap_iters: int = 0
 
     def to_task_spec(self) -> list[str | dict]:
         return [task.to_dict() if isinstance(task, TaskConfig) else task for task in self.task_spec]
@@ -856,15 +837,14 @@ def _iterate_tokenized_requests(
 
 def _pack_requests(
     requests: list[Instance], tokenizer: HfTokenizer, Pos: hax.Axis, max_pack_size: int
-) -> Iterator[LmExample]:
+) -> list[LmExample]:
     packed_iterator = _iterate_tokenized_requests(requests, tokenizer, Pos.size, batch_size=128)
     # TODO: use a better packing algorithm?
-    yield from pack_prompt_completions(
+    return greedy_pack_prompt_completions(
         Pos,
         packed_iterator,
         max_segments_per_example=max_pack_size,
         pad_token=tokenizer.pad_token_id,
-        max_buffered_examples=16,
     )
 
 

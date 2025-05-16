@@ -12,7 +12,7 @@ from levanter.data.text import (
     CANONICAL_FILES_FIELD,
     CANONICAL_ID_FIELD,
     CANONICAL_REPO_NAME_FIELD,
-    LMDatasetConfig,
+    UrlSingleDatasetLMConfig,
 )
 from levanter.store.cache import TreeCache
 
@@ -33,7 +33,7 @@ def _write_tiny_corpus(path):
 
 def tiny_corpus_config(path):
     _write_tiny_corpus(path)
-    return LMDatasetConfig(
+    return UrlSingleDatasetLMConfig(
         train_urls=[f"file://{path}/train/docs.jsonl"],
         validation_urls=[f"file://{path}/validation/docs.jsonl"],
         cache_dir=f"{path}/cache",
@@ -52,7 +52,7 @@ def tiny_asr_corpus_config(path):
 
 def construct_small_data_cache(
     path, num_shards=8, chunk_size=512, doc_len=128, vocab_size=1024
-) -> tuple[LMDatasetConfig, dict[str, TreeCache]]:
+) -> tuple[UrlSingleDatasetLMConfig, dict[str, TreeCache]]:
     from levanter.store.cache import SerialCacheWriter
 
     rng = numpy.random.default_rng(0)
@@ -72,9 +72,9 @@ def construct_small_data_cache(
                 )
         caches[split] = writer.result()
 
-    config = LMDatasetConfig(
-        train_urls=[f"file://{path}/train/docs.jsonl"],
-        validation_urls=[f"file://{path}/validation/docs.jsonl"],
+    config = UrlSingleDatasetLMConfig(
+        train_urls=[],
+        validation_urls=[],
         cache_dir=f"{path}/cache",
         vocab_size=vocab_size,
         tokenizer="gpt2",

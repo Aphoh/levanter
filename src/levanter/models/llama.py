@@ -11,14 +11,14 @@ import haliax as hax
 import haliax.nn as hnn
 from haliax import Axis, AxisSpec, NamedArray
 from haliax.jax_utils import maybe_rng_split, named_call, shaped_rng_split
-from haliax.nn.scan import Stacked
+from haliax.nn.scan import ScanCheckpointPolicy, Stacked
 from haliax.state_dict import ModuleWithStateDictSerialization
 
 from levanter.compat.hf_checkpoints import HFCheckpointConverter, HFCompatConfig
 from levanter.models.attention import AttentionBackend, AttentionMask, dot_product_attention
-from levanter.models.gpt2 import ACT2FN
 from levanter.models.lm_model import LmConfig, LmHeadModel
 from levanter.models.rotary import DefaultRotaryEmbeddingsConfig, RotaryEmbeddingsConfig
+from levanter.utils.activation import ActivationFunctionEnum
 from levanter.utils.flop_utils import lm_flops_per_token
 from levanter.utils.logging import silence_transformer_nag
 from levanter.utils.types import BlockFoldable
@@ -45,6 +45,8 @@ class LlamaConfig(HFCompatConfig):
             Note that num_heads must be divisible by this number. Defaults to 32.
         activation_function (str, optional): activation function for the hidden layer. Defaults to "silu".
         rope_scaling (Dict, optional): dict containing the scaling configuration for the Rotary Positional Embedding.
+        hybrid_norm (bool, optional): whether to use hybrid normalization with additional layer norms after attention and MLP. Defaults to False.
+        input_embedding_norm (bool, optional): whether to use layer normalization after input embeddings. Defaults to False.
     """
 
     seq_len: int = 2048
@@ -53,10 +55,12 @@ class LlamaConfig(HFCompatConfig):
     num_layers: int = 32
     num_heads: int = 32
     num_kv_heads: int = 32
-    activation_function: str = "silu"
+    activation_function: ActivationFunctionEnum = ActivationFunctionEnum.silu
     initializer_range: float = 0.02
     layer_norm_epsilon: float = 1e-5
     tie_word_embeddings: bool = False
+    hybrid_norm: bool = False
+    input_embedding_norm: bool = False
 
     # Attention-related config
     upcast_attn: bool = False
@@ -64,8 +68,7 @@ class LlamaConfig(HFCompatConfig):
     attn_backend: Optional[AttentionBackend] = None
     flash_attention_block_size: Optional[int] = None
 
-    gradient_checkpointing: bool = True
-    gradient_checkpointing_block_size: int = 5
+    gradient_checkpointing: bool | ScanCheckpointPolicy | str = True
     scan_layers: bool = True
 
     use_bias: bool = False
@@ -110,7 +113,7 @@ class LlamaConfig(HFCompatConfig):
             num_layers=hf_config.num_hidden_layers,
             num_heads=hf_config.num_attention_heads,
             num_kv_heads=hf_config.num_key_value_heads,
-            activation_function=hf_config.hidden_act,
+            activation_function=ActivationFunctionEnum(hf_config.hidden_act),
             initializer_range=hf_config.initializer_range,
             layer_norm_epsilon=hf_config.rms_norm_eps,
             tie_word_embeddings=hf_config.tie_word_embeddings,
@@ -126,7 +129,18 @@ class LlamaConfig(HFCompatConfig):
 
         Returns:
             HfLlamaConfig: HuggingFace's LlamaConfig
+
+        Raises:
+            ValueError: If hybrid_norm or input_embedding_norm are enabled, as these features
+                are not supported in the HuggingFace config format.
         """
+        if self.hybrid_norm or self.input_embedding_norm:
+            raise ValueError(
+                "Cannot export to HuggingFace format with hybrid_norm or input_embedding_norm enabled. "
+                "These features are not supported in the HuggingFace config format. "
+                "Please disable these features before exporting."
+            )
+
         if config_overrides is None:
             config_overrides = {}
 
@@ -139,7 +153,7 @@ class LlamaConfig(HFCompatConfig):
             num_hidden_layers=self.num_layers,
             num_attention_heads=self.num_heads,
             num_key_value_heads=self.num_kv_heads,
-            hidden_act=self.activation_function,
+            hidden_act=self.activation_function.name,
             initializer_range=self.initializer_range,
             rms_norm_eps=self.layer_norm_epsilon,
             tie_word_embeddings=self.tie_word_embeddings,
@@ -154,8 +168,8 @@ class LlamaConfig(HFCompatConfig):
     def model_type(self) -> Type["LlamaLMHeadModel"]:
         return LlamaLMHeadModel
 
-    def mk_LayerNorm(self, axis: Axis) -> "LlamaRMSNorm":
-        return LlamaRMSNorm.init(
+    def mk_LayerNorm(self, axis: Axis) -> hnn.RmsNorm:
+        return hnn.RmsNorm.init(
             axis, eps=self.layer_norm_epsilon, use_weight=self.use_layer_norm_weight, use_bias=self.use_bias
         )
 
@@ -181,20 +195,26 @@ class LlamaMlp(eqx.Module):
     gate_proj: hnn.Linear  # projection from Embed to Mlp
     up_proj: hnn.Linear  # projection from Embed to Mlp
     down_proj: hnn.Linear  # projection from Mlp to Embed
-    act: Callable = eqx.static_field()
+    act: Callable = eqx.field(static=True)
 
     @staticmethod
     def init(
-        Embed: Axis, Mlp: Axis, activation_fn: Union[str, Callable], *, key, use_bias: bool = False
+        Embed: AxisSpec,
+        Mlp: AxisSpec,
+        activation_fn: Union[ActivationFunctionEnum, Callable],
+        *,
+        key,
+        use_bias: bool = False,
     ) -> "LlamaMlp":
         k_fc, k_up_proj, k_down_proj = jrandom.split(key, 3)
         gate_proj = hnn.Linear.init(Out=Mlp, In=Embed, key=k_fc, use_bias=use_bias, out_first=True)
         up_proj = hnn.Linear.init(Out=Mlp, In=Embed, key=k_up_proj, use_bias=use_bias, out_first=True)
         down_proj = hnn.Linear.init(Out=Embed, In=Mlp, key=k_down_proj, use_bias=use_bias, out_first=True)
-        if isinstance(activation_fn, str):
-            activation_fn = ACT2FN[activation_fn]
-        act = activation_fn  # type: ignore
-        return LlamaMlp(gate_proj, up_proj, down_proj, act)
+        if isinstance(activation_fn, ActivationFunctionEnum):
+            activation_fn = activation_fn.to_fn()
+        elif isinstance(activation_fn, str):
+            activation_fn = ActivationFunctionEnum(activation_fn).to_fn()
+        return LlamaMlp(gate_proj, up_proj, down_proj, activation_fn)
 
     @named_call
     def __call__(self, x: NamedArray, *, key=None) -> NamedArray:
@@ -207,7 +227,7 @@ class LlamaMlp(eqx.Module):
 
 
 class LlamaAttention(eqx.Module):
-    config: LlamaConfig = eqx.static_field()
+    config: LlamaConfig = eqx.field(static=True)
     q_proj: hnn.Linear  # projection from Embed to query
     k_proj: hnn.Linear  # projection from Embed to key
     v_proj: hnn.Linear  # projection from Embed to value
@@ -246,6 +266,11 @@ class LlamaAttention(eqx.Module):
         rot_embs = self.config.rope.build(self.config.HeadSize, q.resolve_axis("position"))
         q, k = rot_embs(self.config.HeadSize, q, k)
 
+        # gradient checkpointing
+        q = hax.tree_checkpoint_name(q, "q")
+        k = hax.tree_checkpoint_name(k, "k")
+        v = hax.tree_checkpoint_name(v, "v")
+
         k = k.rename({"position": "key_position"})
         v = v.rename({"position": "key_position"})
 
@@ -268,59 +293,21 @@ class LlamaAttention(eqx.Module):
         attn_output = attn_output.astype(x.dtype)
 
         attn_output = self.o_proj(attn_output, key=key_o)
+
+        # gradient checkpointing
+        attn_output = hax.tree_checkpoint_name(attn_output, "attn_output")
+
         return attn_output
 
 
-class LlamaRMSNorm(eqx.Module):
-    """
-    Similar to LayerNorm, but uses the RMS of the input along the specified axis (or axes) instead of variance.
-    """
-
-    axis: AxisSpec = eqx.static_field()
-    weight: Optional[NamedArray]
-    bias: Optional[NamedArray]
-
-    eps: float = eqx.static_field(default=1e-5)
-    dtype: Optional[jnp.dtype] = eqx.static_field(default=jnp.float32)
-
-    @staticmethod
-    def init(axis: AxisSpec, eps: float = 1e-6, use_weight: bool = True, use_bias: bool = True, dtype=jnp.float32):
-        if use_weight:
-            weight = hax.ones(axis)
-        else:
-            weight = None
-        if use_bias:
-            bias = hax.zeros(axis)
-        else:
-            bias = None
-
-        return LlamaRMSNorm(axis, weight, bias, eps, dtype)
-
-    def __call__(self, x: NamedArray) -> NamedArray:
-        # This gives a different result than jnp.var(), which is
-        # defined as the average of the squared deviations from the mean
-        in_dtype = x.dtype
-        x = x.astype(self.dtype)
-        var = hax.mean(hax.square(x), axis=self.axis)
-        inv = hax.rsqrt(var + self.eps)
-        out = x * inv
-        out = out.astype(in_dtype)
-
-        if self.weight is not None:
-            out = self.weight * out
-        if self.bias is not None:
-            out = out + self.bias
-
-        # second cast in case params are in float32
-        return out.astype(in_dtype)
-
-
 class LlamaDecoderLayer(eqx.Module):
-    config: LlamaConfig = eqx.static_field()
+    config: LlamaConfig = eqx.field(static=True)
     self_attn: LlamaAttention
     mlp: LlamaMlp
-    input_layernorm: LlamaRMSNorm
-    post_attention_layernorm: LlamaRMSNorm
+    input_layernorm: hnn.RmsNorm
+    post_attention_layernorm: hnn.RmsNorm
+    post_attn_layernorm: Optional[hnn.RmsNorm] = None
+    post_mlp_layernorm: Optional[hnn.RmsNorm] = None
 
     @staticmethod
     def init(config: LlamaConfig, *, key) -> "LlamaDecoderLayer":
@@ -336,8 +323,12 @@ class LlamaDecoderLayer(eqx.Module):
         )
         ln_1 = config.mk_LayerNorm(config.Embed)
         ln_2 = config.mk_LayerNorm(config.Embed)
-
-        return LlamaDecoderLayer(config, attn, mlp, ln_1, ln_2)
+        post_attn_ln = None
+        post_mlp_ln = None
+        if config.hybrid_norm:
+            post_attn_ln = config.mk_LayerNorm(config.Embed)
+            post_mlp_ln = config.mk_LayerNorm(config.Embed)
+        return LlamaDecoderLayer(config, attn, mlp, ln_1, ln_2, post_attn_ln, post_mlp_ln)
 
     @named_call
     def __call__(self, x: NamedArray, mask: Optional[NamedArray | AttentionMask], *, key=None) -> NamedArray:
@@ -346,20 +337,24 @@ class LlamaDecoderLayer(eqx.Module):
         residual = x
         x = self.input_layernorm(x)
         attn_output = self.self_attn(x=x, mask=mask, key=k_attn)
+        if self.post_attn_layernorm is not None:
+            attn_output = self.post_attn_layernorm(attn_output)
         x = residual + attn_output
 
         # MLP and skip connection
         residual = x
         x = self.post_attention_layernorm(x)
         mlp_output = self.mlp(x, key=k_mlp)
+        if self.post_mlp_layernorm is not None:
+            mlp_output = self.post_mlp_layernorm(mlp_output)
         output = residual + mlp_output
         return output
 
 
 class LlamaTransformer(eqx.Module):
-    config: LlamaConfig = eqx.static_field()
+    config: LlamaConfig = eqx.field(static=True)
     layers: BlockFoldable[LlamaDecoderLayer]
-    norm: LlamaRMSNorm
+    norm: hnn.RmsNorm
 
     @staticmethod
     def init(config: LlamaConfig, *, key) -> "LlamaTransformer":
@@ -392,18 +387,31 @@ class LlamaEmbedding(ModuleWithStateDictSerialization, eqx.Module):
     - Llama doesn't use dropout.
     """
 
-    Vocab: Axis = eqx.static_field()
     token_embeddings: hnn.Embedding
+    norm: Optional[hnn.RmsNorm] = None
 
     @staticmethod
     def init(Vocab: Axis, config: LlamaConfig, *, key) -> "LlamaEmbedding":
-        return LlamaEmbedding(Vocab, hnn.Embedding.init(Vocab, config.Embed, key=key))
+        token_embeddings = hnn.Embedding.init(Vocab, config.Embed, key=key)
+        norm = None
+        if config.input_embedding_norm:
+            norm = config.mk_LayerNorm(config.Embed)
+        return LlamaEmbedding(token_embeddings, norm)
+
+    @property
+    def Vocab(self) -> Axis:
+        return self.token_embeddings.Vocab
+
+    @property
+    def Embed(self) -> Axis:
+        return self.token_embeddings.Embed
 
     @named_call
     def embed(self, input_ids, *args):
         input_embeds = self.token_embeddings(input_ids)
-        x = input_embeds
-        return x
+        if self.norm is not None:
+            input_embeds = self.norm(input_embeds)
+        return input_embeds
 
     def unembed(self, x: NamedArray):
         return self.token_embeddings.unembed(x)
@@ -477,7 +485,7 @@ class LlamaLMHeadModel(ModuleWithStateDictSerialization, LmHeadModel[LlamaConfig
         Args:
             input_ids: token IDs with shape {Pos}
             attn_mask: attention mask with shape {Pos, KeyPos}
-            key: PRNGKey for random number generation
+            key: PRNGKeyArray for random number generation
 
         Returns:
             NamedArray: activations with shape {Pos, Embed}

@@ -4,7 +4,7 @@ import jax.random
 from async_lru import alru_cache
 
 from levanter.data import AsyncDataset
-from levanter.data._prp import Permutation
+from levanter.data._prp import PermType, Permutation
 from levanter.data.dataset import T_co
 
 
@@ -13,11 +13,12 @@ class PermutationDataset(AsyncDataset[T_co]):
 
     # TODO: add epoch reshuffling
 
-    def __init__(self, dataset: AsyncDataset[T_co], key: jax.random.PRNGKey):
+    def __init__(self, dataset: AsyncDataset[T_co], key: jax.random.PRNGKey, perm_type: PermType = "feistel"):
         super().__init__()
         self.dataset = dataset
         self.key = key
         self._permutation: Optional[Permutation] = None
+        self._perm_type = perm_type
 
     async def async_len(self) -> int:
         return await self.dataset.async_len()
@@ -41,11 +42,13 @@ class PermutationDataset(AsyncDataset[T_co]):
 
     async def get_batch(self, indices: Sequence[int]) -> Sequence[T_co]:
         permutation = await self._get_permutation()
-        return await self.dataset.get_batch([permutation(i) for i in indices])
+        return await self.dataset.get_batch(
+            [int(permutation(i)) for i in indices]
+        )  # cast to int to be sure it's python int
 
     async def _get_permutation(self):
         if self._permutation is None:
-            self._permutation = Permutation(await self.async_len(), self.key)
+            self._permutation = Permutation.make(self._perm_type, await self.async_len(), self.key)
         return self._permutation
 
     async def wait_until_len_at_least(self, length: int) -> int:
@@ -53,7 +56,7 @@ class PermutationDataset(AsyncDataset[T_co]):
 
 
 class EraShufflingDataset(AsyncDataset[T_co]):
-    """
+    r"""
     A dataset that shuffles the data in "eras" of fixed length. Era shuffling is somewhere in between a shuffle buffer
     and a permutation. It's a "local" permutation where pi(i) \in [ (i//L) * L, (i//L + 1) * L ) for some era length L.
 
@@ -72,21 +75,24 @@ class EraShufflingDataset(AsyncDataset[T_co]):
     length # over time. This would be a nice feature to have.
     """
 
-    def __init__(self, dataset: AsyncDataset[T_co], era_length: int, *, key: jax.random.PRNGKey):
+    def __init__(
+        self, dataset: AsyncDataset[T_co], era_length: int, *, key: jax.random.PRNGKey, perm_type: PermType = "feistel"
+    ):
         super().__init__()
         self.dataset = dataset
         self.era_length = era_length
         self.key = key
+        self._perm_type = perm_type
 
         @alru_cache(maxsize=4)  # we're mostly going to be going sequentially
         async def gen_era_permutation(era: int) -> Permutation:
             # TODO: support epochs
             # edge case: final era may be shorter than era_length
             current_len = await self.dataset.wait_until_len_at_least((era + 1) * self.era_length)
-            era_length = min(self.era_length, current_len - era * self.era_length)
+            era_length_val = min(self.era_length, current_len - era * self.era_length)
 
             mix_key = jax.random.fold_in(key, era)
-            return Permutation(era_length, mix_key)
+            return Permutation.make(self._perm_type, era_length_val, mix_key)
 
         self.gen_era_permutation = gen_era_permutation
 
@@ -95,7 +101,9 @@ class EraShufflingDataset(AsyncDataset[T_co]):
             raise ValueError("Negative indices are not supported")
         era = idx // self.era_length
         permutation = await self.gen_era_permutation(era)
-        return permutation(idx - era * self.era_length) + era * self.era_length
+        out = permutation(idx - era * self.era_length) + era * self.era_length
+
+        return out
 
     async def async_len(self) -> int:
         return await self.dataset.async_len()

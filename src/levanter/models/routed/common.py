@@ -25,8 +25,9 @@ from haliax.quantization import DotGeneralOp
 from haliax.state_dict import ModuleWithStateDictSerialization, to_torch_compatible_state_dict
 
 from levanter.models.attention import AttentionMask
-from levanter.models.gpt2 import ACT2FN
 from levanter.models.lm_model import LmConfig, LmHeadModel, RoutableLmExample
+from levanter.utils import activation
+from levanter.utils.activation import ActivationFunctionEnum
 from levanter.utils.jax_utils import key_iterator
 from levanter.utils.stat_utils import IndexCountHistogram, IndexCountUnique, LogitHistogram
 from levanter.utils.types import Extras
@@ -88,7 +89,7 @@ class RoutableLmConfig(LmConfig[LmT], abc.ABC):
 
     @property
     @abc.abstractmethod
-    def activation_function(self) -> str:
+    def activation_function(self) -> ActivationFunctionEnum:
         pass
 
     @property
@@ -408,7 +409,7 @@ class RoutedMlpExperts(eqx.Module):
             use_bias=False,
             out_first=True,
         )
-        act = ACT2FN[config.activation_function]
+        act = activation.TO_FN[config.activation_function]
         return RoutedMlpExperts(gate_proj, up_proj, down_proj, act)
 
     @named_call
