@@ -159,3 +159,7 @@ local_*.sh
 .benchmarks
 
 logs/
+
+**/*.DS_Store
+figures/output/
+figures/output/
