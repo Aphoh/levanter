@@ -161,14 +161,14 @@ def compute_next_token_loss(
         if model.config.Layers in z_loss.axes:
             z_loss = hax.mean(z_loss, model.config.Layers)
         if router_zloss_normalize_by_seqlen:
-            z_loss *= example.completion_first_token_mask
+            z_loss *= example.router_input_mask
         extras.loggable["router/z_loss"] = MeanScalar.init(z_loss, where=mask)
         losses += router_zloss_weight * z_loss * example.completion_mask
 
     if lb_loss_weight > 0.0:
         # implementing lbl for router. We can extract the latest load on expert from model.router
         assert expert_mask is not None, "Need expert mask for load balancing loss. Is it disabled?"
-        lb_loss = compute_load_balancing_loss(model.config, expert_mask, example.completion_first_token_mask)
+        lb_loss = compute_load_balancing_loss(model.config, expert_mask, example.router_input_mask)
         # hack: since our lb_loss is [Batch,], we convert it to NamedArray with same shape as losses.
         # These will get averaged across tokens and then across batches, so the lbl is effectively only
         # averaged across batches

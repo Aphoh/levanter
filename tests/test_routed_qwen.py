@@ -60,7 +60,7 @@ def test_routed_qwen_forward():
         x = hax.random.randint(key, (Batch, config.Pos), 0, Vocab.size)
         inds = hax.random.randint(key, (Batch, config.Pos), 0, config.Pos.size - 1)
         first_mask = hax.random.randint(key, (Batch, config.Pos), 0, 1).astype(bool)
-        example = RoutableLmExample(x, None, router_hs_idxs=inds, completion_first_token_mask=first_mask)
+        example = RoutableLmExample(x, None, router_hs_idxs=inds, router_input_mask=first_mask)
         _ = model.routed_forward(example)
 
         # test with num_experts=1
@@ -107,7 +107,7 @@ def test_rqwen_consistent_with_base_qwen(expert_type, expert_init):
     attn_mask = AttentionMask.causal()
     first_mask = hax.random.randint(jax.random.PRNGKey(0), (Batch, config.Pos), 0, 1).astype(bool)
     example = RoutableLmExample(
-        input, None, attn_mask=attn_mask, router_hs_idxs=seq_inds, completion_first_token_mask=first_mask
+        input, None, attn_mask=attn_mask, router_hs_idxs=seq_inds, router_input_mask=first_mask
     )
     input_torch = torch.from_numpy(np.array(input.array)).to(torch.int32)
 
@@ -401,7 +401,7 @@ def test_expert_mask_creation(with_expert_bias):
         hax.ones_like(tokens),
         router_hs_idxs=hs_idxs,
         completion_mask=completion_mask,
-        completion_first_token_mask=first_token_mask,
+        router_input_mask=first_token_mask,
     )
 
     extras = Extras()

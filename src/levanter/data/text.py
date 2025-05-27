@@ -1414,8 +1414,6 @@ class SingleTurnChatJsonlDataSource(JsonlDataSource):
                 i += 1
 
 
-CANONICAL_REPO_NAME_FIELD = "repo_name"
-CANONICAL_FILES_FIELD = "files"
 CANONICAL_FILE_PATH_FIELD = "path"
 CANONICAL_FILE_CONTENT_FIELD = "content"
 CANONICAL_ID_FIELD = "blob_id"
@@ -1435,11 +1433,7 @@ class FIMUrlSourceConfig:
     predict_router_token: bool = False
     predict_fim_token: bool = False
 
-    data_format: str = "flattened"
-    repo_level_percentage = 0.0
     always_include_file_sep: bool = False
-    repo_name_field: str = CANONICAL_REPO_NAME_FIELD
-    files_field: str = CANONICAL_FILES_FIELD
     file_path_field: str = CANONICAL_FILE_PATH_FIELD
     file_content_field: str = CANONICAL_FILE_CONTENT_FIELD
     id_field: str = CANONICAL_ID_FIELD
@@ -1447,16 +1441,12 @@ class FIMUrlSourceConfig:
     prefix_token: str = "<|fim_prefix|>"
     middle_token: str = "<|fim_middle|>"
     suffix_token: str = "<|fim_suffix|>"
-    repo_name_token: str = "<|repo_name|>"
     file_sep_token: str = "<|file_sep|>"
     eos_token: str = "<|endoftext|>"
     pad_token: str = "<|padding|>"
     router_token: str = "<|router|>"
     """The overall prompt format is:
-    <|repo_name|>repo name\n
     <|file_sep|>filename.py\n
-    mycode = x
-    <|file_sep|>target_file.py\n
     <|fim_prefix|>all of the code goes here now except for<|fim_suffix|>which is pretty neat<|fim_middle|>the middle
     """
     replacer_trim_chars: str = "<>|"
@@ -1464,18 +1454,15 @@ class FIMUrlSourceConfig:
     def __post_init__(self):
         if not self.add_router_token:
             assert not self.predict_router_token, "Can't predict router token if it's not in the data"
-        assert self.data_format in ["flattened", "repo_level"]
         assert self.pad_token != self.eos_token
 
-    def get_flattened_source(self, split: str) -> Optional[ShardedDataSource[str]]:
+    def get_source(self, split: str) -> Optional[ShardedDataSource[str]]:
         urls = self.train_urls if split == "train" else self.validation_urls
         if not urls:
             return None
 
         urls = [globbed for url in urls for globbed in fsspec_utils.expand_glob(url)]
-        source = UrlDataSource(
-            urls, columns=[self.repo_name_field, self.id_field, self.file_content_field, self.file_path_field]
-        )
+        source = UrlDataSource(urls, columns=[self.id_field, self.file_content_field, self.file_path_field])
 
         def make_entry(x) -> str:
             hash_input = x[self.id_field]
@@ -1492,55 +1479,6 @@ class FIMUrlSourceConfig:
             to_join = []
             if self.always_include_file_sep:
                 to_join.extend([self.file_sep_token, x[self.file_path_field], "\n"])
-            to_join.extend([self.prefix_token, prefix, self.suffix_token, suffix])
-            if self.add_router_token:
-                to_join.extend([self.router_token])
-            to_join.extend([self.middle_token, middle, self.eos_token])
-            return "".join(to_join)
-
-        return source.map(make_entry)
-
-    def get_repo_level_source(self, split: str) -> Optional[ShardedDataSource[str]]:
-        urls = self.train_urls if split == "train" else self.validation_urls
-        if not urls:
-            return None
-
-        urls = [globbed for url in urls for globbed in fsspec_utils.expand_glob(url)]
-
-        source = UrlDataSource(urls, columns=[self.repo_name_field, self.files_field])
-
-        def make_entry(x) -> str:
-            files = x[self.files_field]
-            assert len(files) > 0, f"No files found in {x[self.file_path_field]}"
-            hash_input = files[0][self.id_field]
-            rand = random.Random(hash(hash_input))
-            is_repo_level = len(files) > 1 and (rand.random() < self.repo_level_percentage)
-            file = files[rand.choice(range(len(files)))]
-            content = self.replace_illegal_chars(file[self.file_content_field])
-            file_len = len(content)
-            i0 = rand.randint(0, file_len - 1)
-            i1 = rand.randint(0, file_len - 1)
-            while i1 == i0:
-                i1 = rand.randint(0, file_len - 1)
-            i0, i1 = min(i0, i1), max(i0, i1) + 1
-            prefix = content[:i0]
-            middle = content[i0:i1]
-            suffix = content[i1:]
-            to_join = []
-            if is_repo_level:
-                to_join = [self.repo_name_token, x[self.repo_name_field], "\n"]
-                for f in files:
-                    to_join.extend(
-                        [
-                            self.file_sep_token,
-                            f[self.file_path_field],
-                            "\n",
-                            self.replace_illegal_chars(f[self.file_content_field]),
-                        ]
-                    )
-
-            if self.always_include_file_sep:
-                to_join.extend([self.file_sep_token, file[self.file_path_field], "\n"])
             to_join.extend([self.prefix_token, prefix, self.suffix_token, suffix])
             if self.add_router_token:
                 to_join.extend([self.router_token])
@@ -1568,7 +1506,6 @@ class FIMUrlSourceConfig:
             self.prefix_token,
             self.middle_token,
             self.suffix_token,
-            self.repo_name_token,
             self.file_sep_token,
             self.eos_token,
             self.pad_token,
@@ -1600,7 +1537,6 @@ class FIMUrlSourceConfig:
                     self.prefix_token,
                     self.middle_token,
                     self.suffix_token,
-                    self.repo_name_token,
                     self.file_sep_token,
                     self.eos_token,
                     self.router_token,
@@ -1765,12 +1701,9 @@ def mk_fim_dataset(
     await_finished: bool = True,
 ) -> AsyncDataset[RoutableLmExample]:
 
-    if config.data_format == "flattened":
-        source = config.get_flattened_source(split)
-    elif config.data_format == "repo_level":
-        source = config.get_repo_level_source(split)
-    else:
-        raise ValueError(f"Unknown data format {config.data_format}")
+    source = config.get_source(split)
+    if source is None:
+        raise ValueError(f"No source URLs configured for split '{split}'")
 
     output_exemplar = {
         "input_ids": np.zeros((0,), dtype=np.int32),

@@ -269,9 +269,9 @@ class RoutableLmHeadModel(Generic[LmConfigT], LmHeadModel[LmConfigT], abc.ABC):
         else:
             expert_mask = hax.where(router_hs_idxs < 0, 0.0, expert_mask).astype(compute_dtype)
 
-        assert example.completion_first_token_mask is not None, "Need completion_first_token_mask for expert mask"
+        assert example.router_input_mask is not None, "Need completion_first_token_mask for expert mask"
         first_token_expert_mask = hax.where(
-            example.completion_first_token_mask.broadcast_to(expert_mask.axes),
+            example.router_input_mask.broadcast_to(expert_mask.axes),
             expert_mask,
             0.0,
         )

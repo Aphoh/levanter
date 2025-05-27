@@ -9,9 +9,7 @@ from levanter.data.audio import AudioIODatasetConfig
 from levanter.data.text import (
     CANONICAL_FILE_CONTENT_FIELD,
     CANONICAL_FILE_PATH_FIELD,
-    CANONICAL_FILES_FIELD,
     CANONICAL_ID_FIELD,
-    CANONICAL_REPO_NAME_FIELD,
     UrlSingleDatasetLMConfig,
 )
 from levanter.store.cache import TreeCache
@@ -83,29 +81,15 @@ def construct_small_data_cache(
     return config, caches
 
 
-def write_fim_data(path, len=128, flattened=False) -> str:
+def write_fim_data(path, length=128) -> str:
     with open(path, "w") as f:
         rand = random.Random(0)
-        for i in range(len):
-            if flattened:
-                output = {  # type: ignore
-                    CANONICAL_REPO_NAME_FIELD: f"repo{i}",
-                    CANONICAL_ID_FIELD: f"file{i}",
-                    CANONICAL_FILE_PATH_FIELD: f"file{i}.txt",
-                    CANONICAL_FILE_CONTENT_FIELD: ("a" * rand.randint(5, 128)),
-                }
-            else:
-                output = {  # type: ignore
-                    CANONICAL_REPO_NAME_FIELD: f"repo{i}",
-                    CANONICAL_FILES_FIELD: [  # type: ignore
-                        {
-                            CANONICAL_ID_FIELD: f"file{i}",
-                            CANONICAL_FILE_PATH_FIELD: f"file{i}.txt",
-                            CANONICAL_FILE_CONTENT_FIELD: ("a" * rand.randint(5, 128)),
-                        }
-                    ],
-                }
-
+        for i in range(length):
+            output = {
+                CANONICAL_ID_FIELD: f"file{i}",
+                CANONICAL_FILE_PATH_FIELD: f"file{i}.txt",
+                CANONICAL_FILE_CONTENT_FIELD: ("a" * rand.randint(5, 128)),
+            }
             f.write(json.dumps(output) + "\n")
         f.flush()
     return path

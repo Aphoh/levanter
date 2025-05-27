@@ -10,6 +10,7 @@ import levanter.tracker
 from levanter.callbacks._core import Callback, CBInfo, JitCallback, LambdaCallback, M, S, StepInfo
 from levanter.callbacks._metrics import (
     _tqdm_logging_one_time_setup,
+    get_total_dataset_tokens,
     log_epoch_progress,
     log_performance_stats,
     log_step_info,
@@ -153,6 +154,7 @@ def _flush_while_waiting(event):
 __all__ = [
     "eval_loss_loop",
     "compute_validation_loss",
+    "get_total_dataset_tokens",
     "wandb_xla_logger",
     "profile",
     "Callback",

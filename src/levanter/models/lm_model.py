@@ -114,7 +114,7 @@ class RoutableLmExample(LmExample):
     """-1 if the token is not routable, otherwise the index of the router hidden state"""
     completion_mask: Optional[hax.NamedArray] = None
     """Mask that's 1 for every element of the completion"""
-    completion_first_token_mask: Optional[hax.NamedArray] = None
+    router_input_mask: Optional[hax.NamedArray] = None
     """Mask that's 1 for the first token of each completion"""
 
     @staticmethod
@@ -131,7 +131,7 @@ class RoutableLmExample(LmExample):
         lm_example = LmExample.causal(tokens, loss_mask=loss_mask, ignore_id=ignore_id, eos_id=eos_id)
         return RoutableLmExample(
             tokens=lm_example.tokens,
-            completion_first_token_mask=completion_first_token_mask,
+            router_input_mask=completion_first_token_mask,
             loss_mask=lm_example.loss_mask,
             attn_mask=lm_example.attn_mask,
             router_hs_idxs=router_hs_idxs,
