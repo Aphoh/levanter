@@ -14,13 +14,13 @@ cluster_name: levanter-cluster
 # Configure GCP
 provider:
   type: gcp
-  region: us-west4
-  availability_zone: us-west4-a
-  project_id: hai-gcp-models
+  region: us-central2
+  availability_zone: us-central2-b
+  project_id: clean-result-415304
 
 # Maximum Workers (excluding Head Node)
-max_workers: 1024
-upscaling_speed: 4.0  # for bursty
+max_workers: 32
+upscaling_speed: 4.0 # for bursty
 
 # List of Available Node Types
 available_node_types:
@@ -28,7 +28,7 @@ available_node_types:
   head_default:
     min_workers: 0
     max_workers: 0
-    resources: {"CPU": 32}
+    resources: { "CPU": 32 }
 
     # GCP-Specific Configuration; by default, Ray will configure unspecified fields (e.g., subnets, ssh-keys)
     #   => Ref: https://cloud.google.com/compute/docs/reference/rest/v1/instances/insert
@@ -46,119 +46,13 @@ available_node_types:
             # Set Source Image =>> Ubuntu 22.04 Base VM
             sourceImage: projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts
 
-  # Worker Nodes =>>
-  tpu_slice_v4_8:
-    min_workers: 0
-    max_workers: 1024
-    resources: { "CPU": 120, "TPU": 4 }
-
-    node_config:
-      acceleratorType: v4-8
-      runtimeVersion: tpu-ubuntu2204-base
-
-      # [IMPORTANT] Configure all TPU Workers to be Preemptible!
-      schedulingConfig:
-        preemptible: true
-
   tpu_slice_v4_32:
     min_workers: 0
-    max_workers: 1024
+    max_workers: 2
     resources: { "CPU": 120, "TPU": 4 }
 
     node_config:
       acceleratorType: v4-32
-      runtimeVersion: tpu-ubuntu2204-base
-
-      # [IMPORTANT] Configure all TPU Workers to be Preemptible!
-      schedulingConfig:
-        preemptible: true
-
-  tpu_slice_v4_64:
-    min_workers: 0
-    max_workers: 1024
-    resources: {"CPU": 120, "TPU": 4}
-
-    node_config:
-      acceleratorType: v4-64
-      runtimeVersion: tpu-ubuntu2204-base
-
-      # [IMPORTANT] Configure all TPU Workers to be Preemptible!
-      schedulingConfig:
-        preemptible: true
-
-  # more slices
-  tpu_slice_v4_128:
-    min_workers: 0
-    max_workers: 1024
-    resources: { "CPU": 120, "TPU": 4 }
-
-    node_config:
-      acceleratorType: v4-128
-      runtimeVersion: tpu-ubuntu2204-base
-
-      # [IMPORTANT] Configure all TPU Workers to be Preemptible!
-      schedulingConfig:
-        preemptible: true
-
-  tpu_slice_v4_256:
-    min_workers: 0
-    max_workers: 1024
-    resources: { "CPU": 120, "TPU": 4 }
-
-    node_config:
-      acceleratorType: v4-256
-      runtimeVersion: tpu-ubuntu2204-base
-
-      # [IMPORTANT] Configure all TPU Workers to be Preemptible!
-      schedulingConfig:
-        preemptible: true
-
-  tpu_slice_v4_512:
-    min_workers: 0
-    max_workers: 1024
-    resources: { "CPU": 120, "TPU": 4 }
-
-    node_config:
-      acceleratorType: v4-512
-      runtimeVersion: tpu-ubuntu2204-base
-
-      # [IMPORTANT] Configure all TPU Workers to be Preemptible!
-      schedulingConfig:
-        preemptible: true
-
-  tpu_slice_v5e_16:
-    min_workers: 0
-    max_workers: 1024
-    resources: { "CPU": 120, "TPU": 4 }
-
-    node_config:
-      acceleratorType: v5litepod-16
-      runtimeVersion: tpu-ubuntu2204-base
-
-      # [IMPORTANT] Configure all TPU Workers to be Preemptible!
-      schedulingConfig:
-        preemptible: true
-
-  tpu_slice_v5e_64:
-    min_workers: 0
-    max_workers: 1024
-    resources: { "CPU": 120, "TPU": 4 }
-
-    node_config:
-      acceleratorType: v5litepod-64
-      runtimeVersion: tpu-ubuntu2204-base
-
-      # [IMPORTANT] Configure all TPU Workers to be Preemptible!
-      schedulingConfig:
-        preemptible: true
-
-  tpu_slice_v5e_256:
-    min_workers: 0
-    max_workers: 1024
-    resources: { "CPU": 120, "TPU": 4 }
-
-    node_config:
-      acceleratorType: v5litepod-256
       runtimeVersion: tpu-ubuntu2204-base
 
       # [IMPORTANT] Configure all TPU Workers to be Preemptible!

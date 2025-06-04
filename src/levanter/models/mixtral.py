@@ -72,6 +72,7 @@ class MixtralConfig(MistralConfig):
     num_experts_per_tok: int = 2
     n_routed_experts: int = 8
     n_shared_experts: int = 0
+    route_every_k: int = 1
 
     lbl_coef: Optional[float] = 0.01
     rzl_coef: Optional[float] = 0.001
@@ -105,12 +106,17 @@ class MixtralConfig(MistralConfig):
     TopExperts = property(lambda self: Axis(name="top_experts", size=self.num_experts_per_tok))
     Mlp = property(lambda self: Axis(name="mlp", size=self.intermediate_dim))
     HeadSize = property(lambda self: Axis(name="head_size", size=self.hidden_dim // self.num_heads))
+    PosGroup = property(lambda self: Axis(name="pos_group", size=self.seq_len // self.route_every_k))
+    Group = property(lambda self: Axis(name="pos_group", size=self.route_every_k))
 
     def __post_init__(self):
         super().__post_init__()
         assert (
             self.num_experts_per_tok <= self.n_routed_experts
         ), f"num_experts_per_tok={self.num_experts_per_tok} greater than by n_routed_experts={self.n_routed_experts}."
+        assert (
+            self.seq_len % self.route_every_k == 0
+        ), f"seq_len={self.seq_len} must be divisible by route_every_k={self.route_every_k}."
 
     def hf_checkpoint_converter(self) -> HFCheckpointConverter["MixtralConfig"]:  # type: ignore
         return HFCheckpointConverter(
@@ -291,7 +297,7 @@ class MixtralMoEMlp(ModuleWithStateDictSerialization):
 class MixtralSparseMoeBlock(eqx.Module):
     """Mixture-of-Experts"""
 
-    config: MistralConfig = eqx.field(static=True)
+    config: MixtralConfig = eqx.field(static=True)
     gate: hnn.Linear  # projection from Embed to Experts
     experts: MixtralMoEMlp
 
@@ -310,6 +316,16 @@ class MixtralSparseMoeBlock(eqx.Module):
         )
 
         return MixtralSparseMoeBlock(config, gate, experts)
+
+    def _resample(self, x: hax.NamedArray):
+        Embed = self.config.Embed
+        Pos, PosGroup, Group = self.config.Pos, self.config.PosGroup, self.config.Group
+        group_elems = x.unflatten_axis(self.config.Pos, (PosGroup, Group))[Group, 0]
+        resampled = group_elems.broadcast_axis(Group).flatten_axes((PosGroup, Group), Pos)
+        if x.has_axis("batch"):
+            return resampled.rearrange((x.resolve_axis("batch"), Pos, Embed))
+        else:
+            return resampled.rearrange((Pos, Embed))
 
     def _route(self, router_probs: NamedArray, Token: Axis, TopExperts: Axis):
         @partial(
@@ -413,6 +429,8 @@ class MixtralSparseMoeBlock(eqx.Module):
 
         k_gate, k_experts, key = maybe_rng_split(key, 3)
 
+        if self.config.route_every_k > 1:
+            x = self._resample(x)
         x_flat = hax.flatten_axes(x, old_axes=squash_axes, new_axis="token")  # [Batch, Pos, Embed] -> [Token, Embed]
         Token = x_flat.resolve_axis("token")
 

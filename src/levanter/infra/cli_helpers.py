@@ -27,6 +27,7 @@ class CliConfig:
     extra_context: str | None = None
     docker_target: str | None = None
     docker_repository: str | None = None
+    docker_registry: str | None = None
     subnetwork: str | None = None
 
     env: dict[str, str] = dataclasses.field(default_factory=dict)

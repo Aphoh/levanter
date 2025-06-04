@@ -105,8 +105,6 @@ def main():
     else:
         raise ValueError(f"Unknown docker registry: {registry}")
 
-    env = {k: v for k, v in args.env}
-
     if "WANDB_PROJECT" not in env:
         env["WANDB_PROJECT"] = "levanter"
 
